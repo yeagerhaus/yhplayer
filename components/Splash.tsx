@@ -48,11 +48,11 @@ export function SplashOverlay() {
 
 const styles = StyleSheet.create({
 	overlay: {
-		...StyleSheet.absoluteFillObject,
+		...StyleSheet.absoluteFill,
 		zIndex: 9999,
 	},
 	image: {
-		...StyleSheet.absoluteFillObject,
+		...StyleSheet.absoluteFill,
 		width: undefined,
 		height: undefined,
 	},

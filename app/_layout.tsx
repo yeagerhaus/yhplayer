@@ -1,6 +1,5 @@
 // Crypto polyfills removed - using expo-crypto instead
-import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
-import { Stack, useRouter } from 'expo-router';
+import { DarkTheme, DefaultTheme, Stack, ThemeProvider, useRouter } from 'expo-router';
 import * as SystemUI from 'expo-system-ui';
 import { useEffect, useRef } from 'react';
 import { AppState, StyleSheet, useColorScheme } from 'react-native';
@@ -142,7 +141,7 @@ export default function RootLayout() {
 	}, [router]);
 
 	useEffect(() => {
-		const bg = Colors[colorScheme ?? 'dark'].background;
+		const bg = Colors[colorScheme === 'light' ? 'light' : 'dark'].background;
 		SystemUI.setBackgroundColorAsync(bg);
 	}, [colorScheme]);
 

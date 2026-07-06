@@ -1,5 +1,5 @@
 import * as Notifications from 'expo-notifications';
-import type { Router } from 'expo-router';
+import type { ImperativeRouter } from 'expo-router';
 
 export function setupNotificationHandler() {
 	Notifications.setNotificationHandler({
@@ -21,7 +21,7 @@ export async function requestNotificationPermissions() {
 	return status === 'granted';
 }
 
-export function addNotificationResponseListener(router: Router) {
+export function addNotificationResponseListener(router: ImperativeRouter) {
 	return Notifications.addNotificationResponseReceivedListener((response) => {
 		const data = response.notification.request.content.data as
 			| {
