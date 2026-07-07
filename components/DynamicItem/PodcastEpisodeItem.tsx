@@ -87,8 +87,7 @@ const PodcastEpisodeItem = React.memo(
 
 		const handlePress = useCallback(() => {
 			router.push({
-				// @ts-expect-error dynamic route
-				pathname: '(podcasts)/episode/[episodeId]',
+				pathname: '/(tabs)/(podcasts)/episode/[episodeId]',
 				params: { episodeId: episode.id, feedId: episode.feedId },
 			});
 		}, [episode.id, episode.feedId]);
@@ -153,8 +152,7 @@ const PodcastEpisodeItem = React.memo(
 					systemImage: 'mic.fill',
 					onPress: () =>
 						router.push({
-							// @ts-expect-error dynamic route
-							pathname: '(podcasts)/[feedId]',
+							pathname: '/(tabs)/(podcasts)/[feedId]',
 							params: { feedId: episode.feedId },
 						}),
 				},

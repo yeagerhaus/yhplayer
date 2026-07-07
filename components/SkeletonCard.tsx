@@ -59,7 +59,7 @@ export function SkeletonList({ count, children }: { count: number; children: Rea
 
 const styles = StyleSheet.create({
 	shimmer: {
-		...StyleSheet.absoluteFillObject,
+		...StyleSheet.absoluteFill,
 		height: '100%',
 	},
 });

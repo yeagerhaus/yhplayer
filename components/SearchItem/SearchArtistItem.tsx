@@ -17,8 +17,7 @@ export default function SearchArtistItem({ artist, query, onPress }: SearchArtis
 
 	const handlePress = () => {
 		router.push({
-			// @ts-expect-error
-			pathname: '(library)/(artists)/[artistId]',
+			pathname: '/(tabs)/(library)/(artists)/[artistId]',
 			params: { artistId: artist.key },
 		});
 		onPress?.();

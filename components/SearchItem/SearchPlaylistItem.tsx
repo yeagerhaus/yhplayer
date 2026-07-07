@@ -18,8 +18,7 @@ export default function SearchPlaylistItem({ playlist, query, onPress }: SearchP
 
 	const handlePress = () => {
 		router.push({
-			// @ts-expect-error
-			pathname: '(library)/(playlists)/[playlistId]',
+			pathname: '/(tabs)/(library)/(playlists)/[playlistId]',
 			params: { playlistId: playlist.key || playlist.id },
 		});
 		onPress?.();

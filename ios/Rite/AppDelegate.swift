@@ -1,4 +1,4 @@
-import Expo
+public import Expo
 import React
 import ReactAppDependencyProvider
 
@@ -19,7 +19,6 @@ public class AppDelegate: ExpoAppDelegate {
 
     reactNativeDelegate = delegate
     reactNativeFactory = factory
-    bindReactNativeFactory(factory)
 
     // Must exist before `super.application` — expo-dev-client's ExpoDevLauncherAppDelegateSubscriber
     // fatalErrors if there is no key window at didFinishLaunching (PhoneSceneDelegate runs too late).

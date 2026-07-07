@@ -37,12 +37,6 @@ export default ({ config }: ConfigContext): ExpoConfig => {
 		icon: './assets/images/riteIcon.png',
 		scheme: 'myapp',
 		userInterfaceStyle: 'automatic',
-		newArchEnabled: false,
-		splash: {
-			image: './assets/images/lightSplash.png',
-			resizeMode: 'cover',
-			backgroundColor: '#ECECEA',
-		},
 		backgroundColor: '#080808',
 		ios: {
 			supportsTablet: true,
@@ -79,6 +73,9 @@ export default ({ config }: ConfigContext): ExpoConfig => {
 			],
 			'expo-web-browser',
 			'expo-notifications',
+			'expo-image',
+			'expo-status-bar',
+			'expo-font',
 		],
 		experiments: {
 			typedRoutes: true,

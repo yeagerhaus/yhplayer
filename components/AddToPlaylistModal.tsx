@@ -135,7 +135,7 @@ export function AddToPlaylistModal() {
 
 const styles = StyleSheet.create({
 	backdropExtras: {
-		...StyleSheet.absoluteFillObject,
+		...StyleSheet.absoluteFill,
 		zIndex: 9999,
 		justifyContent: 'flex-end',
 	},

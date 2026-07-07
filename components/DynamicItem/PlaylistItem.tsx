@@ -25,8 +25,7 @@ export default function PlaylistItem({ item, size, editorial }: PlaylistItemProp
 	const iconSize = Math.round(60 * (s / itemSize));
 	const onPress = () =>
 		router.push({
-			// @ts-expect-error
-			pathname: '(library)/(playlists)/[playlistId]',
+			pathname: '/(tabs)/(library)/(playlists)/[playlistId]',
 			params: { playlistId: item.id },
 		});
 

@@ -41,8 +41,7 @@ export default function PlaylistsScreen() {
 				if (newPlaylist) {
 					setPlaylists([...rawPlaylists, newPlaylist]);
 					router.push({
-						// @ts-expect-error
-						pathname: '(library)/(playlists)/[playlistId]',
+						pathname: '/(tabs)/(library)/(playlists)/[playlistId]',
 						params: { playlistId: newPlaylist.key },
 					});
 				}

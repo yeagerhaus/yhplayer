@@ -5,7 +5,7 @@ import { Colors, createThemedStyles, type ThemeColors } from '@/constants/styles
 import { useAppearanceStore } from '@/hooks/useAppearanceStore';
 
 export function useColors(): ThemeColors {
-	const colorScheme = useColorScheme() ?? 'dark';
+	const colorScheme = useColorScheme() === 'light' ? 'light' : 'dark';
 	const brandColor = useAppearanceStore((s) => s.brandColor);
 	const base = Colors[colorScheme];
 	if (brandColor) {

@@ -50,8 +50,7 @@ export const SongInfo = React.memo(() => {
 						setTimeout(
 							() =>
 								router.push({
-									// @ts-expect-error dynamic route
-									pathname: '(podcasts)/episode/[episodeId]',
+									pathname: '/(tabs)/(podcasts)/episode/[episodeId]',
 									params: { episodeId: currentSong.id, feedId: currentSong.artistKey || '' },
 								}),
 							100,
@@ -67,8 +66,7 @@ export const SongInfo = React.memo(() => {
 						setTimeout(
 							() =>
 								router.push({
-									// @ts-expect-error dynamic route
-									pathname: '(podcasts)/[feedId]',
+									pathname: '/(tabs)/(podcasts)/[feedId]',
 									params: { feedId: currentSong.artistKey || '' },
 								}),
 							100,

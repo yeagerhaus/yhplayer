@@ -32,8 +32,7 @@ export default function SearchAlbumItem({ album, query, onPress }: SearchAlbumIt
 
 	const handlePress = () => {
 		router.push({
-			// @ts-expect-error
-			pathname: '(library)/(albums)/[albumId]',
+			pathname: '/(tabs)/(library)/(albums)/[albumId]',
 			params: { albumId: album.id },
 		});
 		onPress?.();
