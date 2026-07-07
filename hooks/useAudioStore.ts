@@ -281,9 +281,6 @@ function songToTrack(song: Song) {
 	};
 }
 
-/** Pending resume: seek is deferred until first progress (fixes local/downloaded files where seek before play() is ignored). */
-let pendingPodcastResume: { songId: string; position: number } | null = null;
-
 /** Resume position for a podcast: for downloaded episodes use the download record (resumeAt); otherwise progress store. */
 function getPodcastResumePosition(song: Song): number | undefined {
 	const { usePodcastDownloadsStore } = require('@/hooks/usePodcastDownloadsStore');
@@ -298,13 +295,16 @@ function getPodcastResumePosition(song: Song): number | undefined {
 	return undefined;
 }
 
-/** If current song is a podcast with saved progress, schedule resume. For downloaded episodes we use the download's resumeAt. */
+/**
+ * If current song is a podcast with saved progress, resume from it. The native podcast backend
+ * (AVPlayer) applies the seek as soon as the item is ready, so a single seekTo is reliable even
+ * before playback has actually started (no deferred re-seek needed).
+ */
 async function maybeResumePodcast(song: Song): Promise<void> {
 	if (song.source !== 'podcast') return;
 	const position = getPodcastResumePosition(song);
 	if (position == null) return;
 	await TrackPlayer.seekTo(position);
-	pendingPodcastResume = { songId: song.id, position };
 }
 
 // Podcast progress: debounced save while playing (latest position), immediate save on pause
@@ -1081,14 +1081,6 @@ export function useTrackPlayerSync() {
 				progressStore.setDuration(duration);
 				lastProgressTimestamp = Date.now();
 
-				// Deferred podcast resume: for downloaded/local files, seek before play() is often ignored; seek now if we're still near 0.
-				if (pendingPodcastResume) {
-					if (state.currentSong?.id === pendingPodcastResume.songId && position < 10) {
-						await TrackPlayer.seekTo(pendingPodcastResume.position);
-					}
-					pendingPodcastResume = null;
-				}
-
 				// Sleep timer: stop playback when time is up
 				const { sleepTimerEndsAt } = useAudioStore.getState();
 				if (sleepTimerEndsAt != null && Date.now() >= sleepTimerEndsAt) {
@@ -1167,7 +1159,6 @@ export function useTrackPlayerSync() {
 			}
 
 			if (event.type === Event.PlaybackActiveTrackChanged) {
-				pendingPodcastResume = null; // no longer applicable to previous track
 				// Use the event index + our Zustand queue — no native bridge calls needed
 				const trackIndex = event.index;
 				if (trackIndex == null || trackIndex < 0 || trackIndex >= state.queue.length) return;

@@ -63,7 +63,12 @@ export const usePodcastProgressStore = create<PodcastProgressState>((set, get) =
 	saveProgress: (episodeId: string, position: number, duration: number, completed?: boolean) => {
 		const { progressByEpisodeId } = get();
 		const existing = progressByEpisodeId[episodeId];
-		const isCompleted = completed ?? (duration > 0 && (position >= duration - 10 || position >= duration * 0.95));
+		// Only mark complete near the actual end. Use an absolute 60s cap so long episodes (e.g. a
+		// 3-hour show) aren't flagged complete ~9 minutes early by a percentage rule; fall back to a
+		// tight 98% for short clips where 60s would be most of the episode.
+		const NEAR_END_SECONDS = 60;
+		const completionThreshold = duration > 0 ? Math.max(duration - NEAR_END_SECONDS, duration * 0.98) : 0;
+		const isCompleted = completed ?? (duration > 0 && position >= completionThreshold);
 		const next: EpisodeProgress = {
 			position: Math.max(0, position),
 			duration: Math.max(0, duration),
