@@ -8,7 +8,6 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Div, type GradientConfig } from '@/components/Div';
 import { Text } from '@/components/Text';
 import { useUltraBlurColors } from '@/hooks';
-import { useAppearanceStore } from '@/hooks/useAppearanceStore';
 import { useAudioStore } from '@/hooks/useAudioStore';
 import { useColors } from '@/hooks/useColors';
 
@@ -16,7 +15,6 @@ const PRESS_DOWN = { duration: 80 } as const;
 const PRESS_UP = { duration: 150 } as const;
 
 export function MiniPlayer() {
-	const { useBlurInsteadOfGlass } = useAppearanceStore();
 	const router = useRouter();
 	const currentSong = useAudioStore((state) => state.currentSong);
 	const insets = useSafeAreaInsets();

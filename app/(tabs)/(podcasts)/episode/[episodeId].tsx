@@ -236,8 +236,7 @@ export default function EpisodeDetailScreen() {
 							onPress={() =>
 								feedId &&
 								router.push({
-									// @ts-expect-error dynamic route
-									pathname: '(podcasts)/[feedId]',
+									pathname: '/(tabs)/(podcasts)/[feedId]',
 									params: { feedId },
 								})
 							}

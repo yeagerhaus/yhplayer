@@ -25,8 +25,7 @@ export default function PodcastShowItem({ item, size }: PodcastShowItemProps) {
 
 	const navigateToFeed = useCallback(() => {
 		router.push({
-			// @ts-expect-error dynamic route
-			pathname: '(podcasts)/[feedId]',
+			pathname: '/(tabs)/(podcasts)/[feedId]',
 			params: { feedId: item.id },
 		});
 	}, [item.id]);

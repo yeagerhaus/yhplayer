@@ -23,8 +23,7 @@ export default function ArtistItem({ item, size: _size }: ArtistItemProps) {
 			style={styles.item}
 			onPress={() =>
 				router.push({
-					// @ts-expect-error
-					pathname: '(library)/(artists)/[artistId]',
+					pathname: '/(tabs)/(library)/(artists)/[artistId]',
 					params: { artistId: item.key },
 				})
 			}

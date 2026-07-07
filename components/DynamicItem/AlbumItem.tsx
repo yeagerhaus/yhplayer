@@ -24,8 +24,7 @@ export default function AlbumItem({ item, size, editorial }: AlbumItemProps) {
 	const s = size ?? itemSize;
 	const onPress = () =>
 		router.push({
-			// @ts-expect-error
-			pathname: '(library)/(albums)/[albumId]',
+			pathname: '/(tabs)/(library)/(albums)/[albumId]',
 			params: { albumId: item.id },
 		});
 
