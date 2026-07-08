@@ -1,7 +1,7 @@
 import { InteractionManager } from 'react-native';
 import { getIsOfflineMode } from '@/hooks/useOfflineModeStore';
 import { storage } from '@/lib/storage';
-import type { Album, Artist, Playlist, Song } from '@/types';
+import type { Album, Artist, HomeHub, Playlist, Song } from '@/types';
 
 let useLibraryStore: any;
 try {
@@ -13,6 +13,7 @@ const CACHE_ALBUMS = 'CACHE_ALBUMS';
 const CACHE_ARTISTS = 'CACHE_ARTISTS';
 const CACHE_PLAYLISTS = 'CACHE_PLAYLISTS';
 const CACHE_RECENTLY_PLAYED = 'CACHE_RECENTLY_PLAYED';
+const CACHE_HUBS = 'CACHE_HUBS';
 const CACHE_LAST_FETCHED = 'CACHE_LAST_FETCHED';
 const LEGACY_LIBRARY_KEY = 'LIBRARY_STATE';
 
@@ -22,6 +23,7 @@ interface LibraryCachePayload {
 	artists: Artist[];
 	playlists: Playlist[];
 	recentlyPlayed: Song[];
+	hubs: HomeHub[];
 	lastFetchedAt?: number;
 }
 
@@ -40,6 +42,7 @@ export function saveLibraryToCache() {
 		storage.set(CACHE_ARTISTS, JSON.stringify(state.artists));
 		storage.set(CACHE_PLAYLISTS, JSON.stringify(state.playlists));
 		storage.set(CACHE_RECENTLY_PLAYED, JSON.stringify(state.recentlyPlayed));
+		storage.set(CACHE_HUBS, JSON.stringify(state.hubs));
 		storage.set(CACHE_LAST_FETCHED, String(Date.now()));
 	} catch (err) {
 		console.error('Failed to save library state:', err);
@@ -57,6 +60,7 @@ export function loadLibraryFromCache(): LibraryCachePayload | null {
 				const artistsRaw = storage.getString(CACHE_ARTISTS);
 				const playlistsRaw = storage.getString(CACHE_PLAYLISTS);
 				const recentlyPlayedRaw = storage.getString(CACHE_RECENTLY_PLAYED);
+				const hubsRaw = storage.getString(CACHE_HUBS);
 				const lastFetchedRaw = storage.getString(CACHE_LAST_FETCHED);
 				return {
 					tracks,
@@ -64,6 +68,7 @@ export function loadLibraryFromCache(): LibraryCachePayload | null {
 					artists: artistsRaw ? JSON.parse(artistsRaw) : [],
 					playlists: playlistsRaw ? JSON.parse(playlistsRaw) : [],
 					recentlyPlayed: recentlyPlayedRaw ? JSON.parse(recentlyPlayedRaw) : [],
+					hubs: hubsRaw ? JSON.parse(hubsRaw) : [],
 					lastFetchedAt: lastFetchedRaw ? Number(lastFetchedRaw) : undefined,
 				};
 			}
@@ -82,6 +87,7 @@ export function loadLibraryFromCache(): LibraryCachePayload | null {
 					artists: Array.isArray(parsed.artists) ? parsed.artists : [],
 					playlists: Array.isArray(parsed.playlists) ? parsed.playlists : [],
 					recentlyPlayed: Array.isArray(parsed.recentlyPlayed) ? parsed.recentlyPlayed : [],
+					hubs: Array.isArray(parsed.hubs) ? parsed.hubs : [],
 					lastFetchedAt: parsed.lastFetchedAt,
 				};
 				// Re-save in split format
@@ -94,7 +100,14 @@ export function loadLibraryFromCache(): LibraryCachePayload | null {
 			}
 
 			if (Array.isArray(parsed)) {
-				const payload: LibraryCachePayload = { tracks: parsed, albums: [], artists: [], playlists: [], recentlyPlayed: [] };
+				const payload: LibraryCachePayload = {
+					tracks: parsed,
+					albums: [],
+					artists: [],
+					playlists: [],
+					recentlyPlayed: [],
+					hubs: [],
+				};
 				storage.set(CACHE_TRACKS, JSON.stringify(parsed));
 				return payload;
 			}
@@ -150,6 +163,7 @@ export function rehydrateLibraryStore(): boolean {
 		playlists: cached.playlists,
 		playlistsById,
 		recentlyPlayed: cached.recentlyPlayed,
+		hubs: cached.hubs ?? [],
 	});
 
 	return true;
@@ -162,6 +176,7 @@ export function clearLibraryCache() {
 		storage.remove(CACHE_ARTISTS);
 		storage.remove(CACHE_PLAYLISTS);
 		storage.remove(CACHE_RECENTLY_PLAYED);
+		storage.remove(CACHE_HUBS);
 		storage.remove(CACHE_LAST_FETCHED);
 	} catch (err) {
 		console.error('Failed to clear library cache:', err);
@@ -177,16 +192,24 @@ export async function clearCacheAndReload(): Promise<number> {
 	if (getIsOfflineMode()) {
 		return 0;
 	}
-	const { fetchAllTracks, fetchAllAlbums, fetchAllArtists, fetchAllPlaylists, fetchRecentlyPlayed } = require('@/utils/plex');
+	const {
+		fetchAllTracks,
+		fetchAllAlbums,
+		fetchAllArtists,
+		fetchAllPlaylists,
+		fetchRecentlyPlayed,
+		fetchSectionHubs,
+	} = require('@/utils/plex');
 	const store = getStore();
 
 	try {
-		const [tracks, albums, artists, playlists, recentlyPlayed] = await Promise.all([
+		const [tracks, albums, artists, playlists, recentlyPlayed, hubs] = await Promise.all([
 			fetchAllTracks(),
 			fetchAllAlbums(),
 			fetchAllArtists(),
 			fetchAllPlaylists(),
 			fetchRecentlyPlayed(15),
+			fetchSectionHubs().catch(() => []),
 		]);
 
 		const state = store.getState();
@@ -195,6 +218,7 @@ export async function clearCacheAndReload(): Promise<number> {
 		if (artists.length > 0) state.setArtists(artists);
 		if (playlists.length > 0) state.setPlaylists(playlists);
 		if (recentlyPlayed.length > 0) state.setRecentlyPlayed(recentlyPlayed);
+		if (hubs.length > 0) state.setHubs(hubs);
 
 		InteractionManager.runAfterInteractions(() => {
 			saveLibraryToCache();

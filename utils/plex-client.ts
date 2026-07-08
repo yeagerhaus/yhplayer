@@ -2,6 +2,7 @@ import { fetch } from 'expo/fetch';
 import { getIsOfflineMode } from '@/hooks/useOfflineModeStore';
 import type { Album } from '@/types/album';
 import type { Artist } from '@/types/artist';
+import type { HomeHub } from '@/types/home';
 import type { Playlist } from '@/types/playlist';
 import type { LoudnessData, Song } from '@/types/song';
 import { plexAuthService } from './plex-auth';
@@ -543,6 +544,85 @@ export class PlexClient {
 	}
 
 	/**
+	 * Fetch home hubs for the music section — "Mixes For You", radio stations,
+	 * recently added, etc. (GET /hubs/sections/{sectionId}). Returns normalized
+	 * hubs grouped by content type; hubs with no usable items are dropped.
+	 */
+	async fetchSectionHubs(count = 12): Promise<HomeHub[]> {
+		await this.initialize();
+
+		if (!this.musicSectionId) {
+			await this.discoverMusicSection();
+		}
+
+		if (!this.musicSectionId) {
+			throw new Error('Music section ID not found. Please ensure your library has a music section.');
+		}
+
+		const response = await this.request(`/hubs/sections/${this.musicSectionId}`, {
+			includeMyMixes: '1',
+			includeStations: '1',
+			count: String(count),
+		});
+
+		const data = response.data as any;
+		const rawHubs = data?.MediaContainer?.Hub;
+		if (!rawHubs) return [];
+		const hubList = Array.isArray(rawHubs) ? rawHubs : [rawHubs];
+
+		const hubs: HomeHub[] = [];
+		for (const hub of hubList) {
+			const rawMeta = hub?.Metadata;
+			if (!rawMeta) continue;
+			const items = Array.isArray(rawMeta) ? rawMeta : [rawMeta];
+
+			const tracks: Song[] = [];
+			const albums: Album[] = [];
+			const playlists: Playlist[] = [];
+
+			for (const item of items) {
+				try {
+					switch (item?.type) {
+						case 'track':
+							tracks.push(this.formatTrack(item));
+							break;
+						case 'album':
+							albums.push(this.formatAlbum(item));
+							break;
+						case 'playlist':
+						case 'mix':
+							playlists.push(this.formatPlaylist(item));
+							break;
+						default:
+							// Mixes/stations sometimes arrive without a type but carry a playlist key.
+							if (typeof item?.key === 'string' && (item.playlistType === 'audio' || item.key.includes('/playlists/'))) {
+								playlists.push(this.formatPlaylist(item));
+							}
+							break;
+					}
+				} catch {
+					// Skip malformed hub items rather than failing the whole hub.
+				}
+			}
+
+			if (tracks.length === 0 && albums.length === 0 && playlists.length === 0) continue;
+
+			hubs.push({
+				id: hub.hubIdentifier || hub.key || hub.title || `hub-${hubs.length}`,
+				title: hub.title || '',
+				identifier: hub.hubIdentifier || '',
+				style: hub.style,
+				type: hub.type,
+				tracks,
+				albums,
+				playlists,
+			});
+		}
+
+		return hubs;
+	}
+
+	/**
 	 * Fetch all artists from the music library (type 8)
 	 */
 	async fetchAllArtists(): Promise<Artist[]> {
@@ -1059,6 +1139,7 @@ export const plexClient = new PlexClient();
 export const testPlexServer = () => plexClient.testConnectivity();
 export const fetchAllTracks = () => plexClient.fetchAllTracks();
 export const fetchRecentlyPlayed = (limit?: number) => plexClient.fetchRecentlyPlayed(limit);
+export const fetchSectionHubs = (count?: number) => plexClient.fetchSectionHubs(count);
 export const fetchAllArtists = () => plexClient.fetchAllArtists();
 export const fetchAllAlbums = () => plexClient.fetchAllAlbums();
 export const fetchAllPlaylists = () => plexClient.fetchAllPlaylists();

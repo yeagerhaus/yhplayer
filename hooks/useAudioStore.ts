@@ -86,6 +86,7 @@ interface AudioState {
 	seekTo: (position: number) => Promise<void>;
 	skipBackward15: () => Promise<void>;
 	skipForward15: () => Promise<void>;
+	unloadPlayer: () => Promise<void>;
 
 	// Queue management
 	addToQueue: (songs: Song[]) => Promise<void>;
@@ -907,6 +908,43 @@ export const useAudioStore = create<AudioState>((set, get) => ({
 			.catch((err) => console.warn('Failed to reset queue:', err));
 	},
 
+	// Fully unload the player: stop playback, clear the queue, current song,
+	// persisted playback state, and reset progress. Leaves user settings
+	// (repeat/shuffle/volume/rate/sleep timer) untouched.
+	unloadPlayer: async () => {
+		try {
+			await TrackPlayer.reset();
+		} catch (error) {
+			console.warn('Failed to reset player during unload:', error);
+		}
+
+		prewarmedSongId = null;
+		lastCrossfadeSignature = '';
+
+		set({
+			currentSong: null,
+			queue: [],
+			originalQueue: [],
+			isPlaying: false,
+			isBuffering: false,
+			artworkBgColor: null,
+			currentPlaylistRatingKey: null,
+			error: null,
+		});
+
+		try {
+			const progressStore = getProgressStore();
+			progressStore.getState().setPosition(0);
+			progressStore.getState().setDuration(0);
+		} catch {}
+
+		storage.remove(STORAGE_QUEUE_KEY);
+		storage.remove(STORAGE_ORIGINAL_QUEUE_KEY);
+		storage.remove(STORAGE_SONG_KEY);
+		storage.remove(STORAGE_SONG_DATA_KEY);
+		storage.remove(STORAGE_POSITION_KEY);
+	},
+
 	// Reorder queue
 	reorderQueue: (fromIndex: number, toIndex: number) => {
 		const state = get();
@@ -1205,6 +1243,31 @@ export function useTrackPlayerSync() {
 			}
 
 			if (event.type === Event.PlaybackError) {
+				// TEMP DIAGNOSTIC: log the failing track's URL + probe the server response.
+				// Remove once the playback-failure cause is identified.
+				if (__DEV__ && state.currentSong) {
+					try {
+						const failingTrack = songToTrack(state.currentSong);
+						console.warn(
+							`🛑 PlaybackError: id=${state.currentSong.id} "${state.currentSong.title}" source=${state.currentSong.source ?? 'music'}`,
+							(event as any)?.message ?? (event as any)?.code ?? event,
+						);
+						console.warn(`🛑 URL: ${failingTrack.url}`);
+						if ((failingTrack as any).directUrl) console.warn(`🛑 directUrl: ${(failingTrack as any).directUrl}`);
+						if (typeof failingTrack.url === 'string' && failingTrack.url.startsWith('http')) {
+							fetch(failingTrack.url, { method: 'HEAD' })
+								.then((res) => {
+									console.warn(
+										`🛑 HEAD ${res.status} ${res.statusText} · content-type=${res.headers.get('content-type')} · content-length=${res.headers.get('content-length')}`,
+									);
+								})
+								.catch((e) => console.warn('🛑 HEAD probe failed:', e?.message ?? e));
+						}
+					} catch (e: any) {
+						console.warn('🛑 PlaybackError diagnostic failed:', e?.message ?? e);
+					}
+				}
+
 				// Only retry if we were actually playing — never auto-play from a paused/restored state.
 				if (!state.isPlaying) return;
 

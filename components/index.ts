@@ -4,6 +4,8 @@ export * from './BottomSheet/MiniPlayer';
 export * from './ContextMenu';
 export * from './Div';
 export * from './DynamicItem';
+export * from './ForYouCard';
+export * from './HeroCard';
 export * from './HomeSection';
 export * from './Main';
 export * from './MusicVisualizer';

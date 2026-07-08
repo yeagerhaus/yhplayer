@@ -1,3 +1,4 @@
+import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
@@ -73,6 +74,12 @@ const MiniPlayerContent = React.memo(() => {
 	const skipToNext = useAudioStore((state) => state.skipToNext);
 	const skipBackward15 = useAudioStore((state) => state.skipBackward15);
 	const skipForward15 = useAudioStore((state) => state.skipForward15);
+	const unloadPlayer = useAudioStore((state) => state.unloadPlayer);
+
+	const handleUnload = React.useCallback(() => {
+		Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+		unloadPlayer();
+	}, [unloadPlayer]);
 
 	const isPodcast = currentSong?.source === 'podcast';
 	const artwork = React.useMemo(() => currentSong?.artworkUrl || currentSong?.artwork, [currentSong?.artworkUrl, currentSong?.artwork]);
@@ -119,7 +126,7 @@ const MiniPlayerContent = React.memo(() => {
 						<Pressable style={styles.controlButton} onPress={skipBackward15}>
 							<SymbolView name='gobackward.15' type='hierarchical' size={22} tintColor={colors.brand} />
 						</Pressable>
-						<Pressable style={styles.controlButton} onPress={togglePlayPause}>
+						<Pressable style={styles.controlButton} onPress={togglePlayPause} onLongPress={handleUnload}>
 							<SymbolView
 								name={isPlaying ? 'pause.fill' : 'play.fill'}
 								type='hierarchical'
@@ -133,7 +140,7 @@ const MiniPlayerContent = React.memo(() => {
 					</>
 				) : (
 					<>
-						<Pressable style={styles.controlButton} onPress={togglePlayPause}>
+						<Pressable style={styles.controlButton} onPress={togglePlayPause} onLongPress={handleUnload}>
 							<SymbolView
 								name={isPlaying ? 'pause.fill' : 'play.fill'}
 								type='hierarchical'
