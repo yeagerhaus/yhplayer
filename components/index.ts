@@ -1,5 +1,6 @@
 export * from './AddToPlaylistModal';
 export * from './BottomSheet/ExpandedPlayer';
+export * from './BottomSheet/FullBleedPlayer';
 export * from './BottomSheet/MiniPlayer';
 export * from './ContextMenu';
 export * from './Div';

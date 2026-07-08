@@ -59,6 +59,8 @@ export default function AppearanceScreen() {
 		setBrandColor,
 		useBlurInsteadOfGlass,
 		setUseBlurInsteadOfGlass,
+		useFullBleedPlayer,
+		setUseFullBleedPlayer,
 	} = useAppearanceStore();
 	const colors = useColors();
 	const effectiveBrand = brandColor ?? DEFAULT_BRAND_COLOR;
@@ -158,6 +160,19 @@ export default function AppearanceScreen() {
 					onValueChange={setUseBlurInsteadOfGlass}
 				/>
 			</Div> */}
+
+			<Div transparent style={DefaultStyles.section}>
+				<Text type='h3' style={DefaultStyles.sectionTitle}>
+					Now Playing
+				</Text>
+
+				<SwitchRow
+					label='Full-bleed player'
+					description='Show album artwork as a full-screen background in the expanded player.'
+					value={useFullBleedPlayer}
+					onValueChange={setUseFullBleedPlayer}
+				/>
+			</Div>
 
 			<Div transparent style={DefaultStyles.section}>
 				<Text type='h3' style={DefaultStyles.sectionTitle}>

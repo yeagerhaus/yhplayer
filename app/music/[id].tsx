@@ -15,7 +15,9 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Div } from '@/components';
 import { ExpandedPlayer } from '@/components/BottomSheet/ExpandedPlayer';
+import { FullBleedPlayer } from '@/components/BottomSheet/FullBleedPlayer';
 import { useRootScale } from '@/ctx/RootScaleContext';
+import { useAppearanceStore } from '@/hooks/useAppearanceStore';
 
 // Constants moved outside component to prevent recalculation
 const SCALE_FACTOR = 0.83;
@@ -41,6 +43,8 @@ const DISMISS_CONFIG = {
 function MusicScreen() {
 	const router = useRouter();
 	const { scale, setScale } = useRootScale();
+	const useFullBleedPlayer = useAppearanceStore((s) => s.useFullBleedPlayer);
+	const Player = useFullBleedPlayer ? FullBleedPlayer : ExpandedPlayer;
 
 	// Queue state
 	const [queueOpen, setQueueOpen] = useState(false);
@@ -272,11 +276,7 @@ function MusicScreen() {
 		<Div style={staticStyles.root}>
 			<StatusBar animated={true} style={statusBarStyle.value} />
 			<Animated.View style={[staticStyles.playerContainer, animatedStyle]}>
-				<ExpandedPlayer
-					scrollComponent={queueOpen ? undefined : ScrollComponent}
-					queueOpen={queueOpen}
-					onToggleQueue={toggleQueue}
-				/>
+				<Player scrollComponent={queueOpen ? undefined : ScrollComponent} queueOpen={queueOpen} onToggleQueue={toggleQueue} />
 			</Animated.View>
 		</Div>
 	);
