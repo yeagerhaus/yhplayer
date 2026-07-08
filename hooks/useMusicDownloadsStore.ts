@@ -1,6 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { create } from 'zustand';
-import { usePlaybackSettingsStore } from '@/hooks/usePlaybackSettingsStore';
 import { storage } from '@/lib/storage';
 import type { Album } from '@/types/album';
 import type { Artist } from '@/types/artist';
@@ -91,7 +90,11 @@ interface MusicDownloadsState {
 	removeAllDownloads: () => Promise<void>;
 }
 
-let processing = false;
+/** Number of tracks downloaded in parallel. Kept modest to avoid overwhelming the Plex server. */
+const MAX_CONCURRENT_MUSIC_DOWNLOADS = 4;
+/** Retries per track. Concurrent Plex transcodes can transiently fail under load; a short backoff recovers them. */
+const MAX_DOWNLOAD_RETRIES = 2;
+let activeMusicWorkers = 0;
 
 function persistDownloads(downloads: Record<string, MusicDownload>) {
 	storage.set(STORAGE_KEY, JSON.stringify(Object.values(downloads)));
@@ -109,77 +112,105 @@ function persistAlbums(albums: Record<string, Album>) {
 	storage.set(ALBUMS_STORAGE_KEY, JSON.stringify(Object.values(albums)));
 }
 
-async function processQueue(
-	get: () => MusicDownloadsState,
-	set: (partial: Partial<MusicDownloadsState> | ((s: MusicDownloadsState) => Partial<MusicDownloadsState>)) => void,
-) {
-	if (processing) return;
-	processing = true;
+type StoreGet = () => MusicDownloadsState;
+type StoreSet = (partial: Partial<MusicDownloadsState> | ((s: MusicDownloadsState) => Partial<MusicDownloadsState>)) => void;
 
+/** Download a single already-dequeued song and update the store accounting (success or failure). */
+async function downloadQueuedSong(song: Song, get: StoreGet, set: StoreSet): Promise<void> {
+	if (get().downloads[song.id]) {
+		set((s) => ({ queueCompleted: s.queueCompleted + 1 }));
+		return;
+	}
+
+	set((s) => ({ downloading: new Set(s.downloading).add(song.id) }));
+
+	const dir = `${FileSystem.documentDirectory ?? ''}music`;
+	const ext = extensionFromUrl(song.uri || song.streamUrl || '');
+	const filename = `${safeSegment(song.id)}${ext}`;
+	const localPath = `${dir}/${filename}`;
+
+	const finishFailure = () => {
+		set((s) => {
+			const d = new Set(s.downloading);
+			d.delete(song.id);
+			return { downloading: d, queueCompleted: s.queueCompleted + 1 };
+		});
+	};
+
+	for (let attempt = 0; attempt <= MAX_DOWNLOAD_RETRIES; attempt++) {
+		try {
+			if (attempt > 0) {
+				// Backoff lets in-flight sibling downloads finish and the server recover before retrying.
+				await new Promise((resolve) => setTimeout(resolve, 600 * attempt));
+			}
+			await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
+			const sourceUrl = song.uri || song.streamUrl || '';
+			// Always download the original file (no server-side transcode). Plex's universal transcoder
+			// is CPU-bound and single-session, so running several transcodes in parallel overwhelmed the
+			// server (truncated files / NSURLError -1017). Original files are static, so many download
+			// reliably in parallel. The download-quality setting is hidden while this holds.
+			const { url: downloadUrl } = buildPlexStreamUrl(song, sourceUrl, null);
+			const downloadResumable = FileSystem.createDownloadResumable(downloadUrl, localPath, {
+				sessionType: FileSystem.FileSystemSessionType.BACKGROUND,
+			});
+			const result = await downloadResumable.downloadAsync();
+			if (!result?.uri) throw new Error('Download returned no URI');
+
+			const entry: MusicDownload = {
+				songId: song.id,
+				localUri: result.uri,
+				title: song.title,
+				artist: song.artist,
+				album: song.album,
+				artistKey: song.artistKey,
+				artworkUrl: song.artworkUrl,
+				downloadedAt: Date.now(),
+				...(song.loudnessData ? { loudnessData: song.loudnessData } : {}),
+			};
+
+			set((s) => {
+				const d = new Set(s.downloading);
+				d.delete(song.id);
+				return { downloads: { ...s.downloads, [song.id]: entry }, downloading: d, queueCompleted: s.queueCompleted + 1 };
+			});
+			persistDownloads(get().downloads);
+			return;
+		} catch (err) {
+			if (attempt === MAX_DOWNLOAD_RETRIES) {
+				console.warn(`Music download failed for ${song.title} after ${attempt + 1} attempts:`, err);
+				finishFailure();
+				return;
+			}
+			console.warn(`Music download retry ${attempt + 1}/${MAX_DOWNLOAD_RETRIES} for ${song.title}:`, err);
+		}
+	}
+}
+
+/** A single worker: atomically dequeues one song at a time and downloads it until the queue drains. */
+async function musicDownloadWorker(get: StoreGet, set: StoreSet): Promise<void> {
 	try {
 		while (true) {
-			const { queue, downloads } = get();
+			const { queue } = get();
 			if (queue.length === 0) break;
-
+			// Dequeue synchronously (no await between read and write) so concurrent workers never
+			// grab the same item.
 			const song = queue[0];
-			const remaining = queue.slice(1);
-			set({ queue: remaining });
-
-			if (downloads[song.id]) {
-				set((s) => ({ queueCompleted: s.queueCompleted + 1 }));
-				continue;
-			}
-
-			set((s) => ({ downloading: new Set(s.downloading).add(song.id) }));
-
-			const dir = `${FileSystem.documentDirectory ?? ''}music`;
-			const ext = extensionFromUrl(song.uri || song.streamUrl || '');
-			const filename = `${safeSegment(song.id)}${ext}`;
-			const localPath = `${dir}/${filename}`;
-
-			try {
-				await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
-				const sourceUrl = song.uri || song.streamUrl || '';
-				const downloadBitrateKbps = usePlaybackSettingsStore.getState().downloadBitrateKbps;
-				const { url: downloadUrl } = buildPlexStreamUrl(song, sourceUrl, downloadBitrateKbps);
-				const downloadResumable = FileSystem.createDownloadResumable(downloadUrl, localPath, {
-					sessionType: FileSystem.FileSystemSessionType.BACKGROUND,
-				});
-				const result = await downloadResumable.downloadAsync();
-				if (!result?.uri) throw new Error('Download returned no URI');
-				const uri = result.uri;
-
-				const entry: MusicDownload = {
-					songId: song.id,
-					localUri: uri,
-					title: song.title,
-					artist: song.artist,
-					album: song.album,
-					artistKey: song.artistKey,
-					artworkUrl: song.artworkUrl,
-					downloadedAt: Date.now(),
-					...(song.loudnessData ? { loudnessData: song.loudnessData } : {}),
-				};
-
-				const next = { ...get().downloads, [song.id]: entry };
-				set((s) => {
-					const d = new Set(s.downloading);
-					d.delete(song.id);
-					return { downloads: next, downloading: d, queueCompleted: s.queueCompleted + 1 };
-				});
-				persistDownloads(next);
-			} catch (err) {
-				console.warn(`Music download failed for ${song.title}:`, err);
-				set((s) => {
-					const d = new Set(s.downloading);
-					d.delete(song.id);
-					return { downloading: d, queueCompleted: s.queueCompleted + 1 };
-				});
-			}
+			set({ queue: queue.slice(1) });
+			await downloadQueuedSong(song, get, set);
 		}
 	} finally {
-		processing = false;
-		set({ queueTotal: 0, queueCompleted: 0 });
+		activeMusicWorkers--;
+		if (activeMusicWorkers === 0) {
+			set({ queueTotal: 0, queueCompleted: 0 });
+		}
+	}
+}
+
+/** Spin up workers (up to the concurrency cap) to drain the queue in parallel. */
+function processQueue(get: StoreGet, set: StoreSet) {
+	while (activeMusicWorkers < MAX_CONCURRENT_MUSIC_DOWNLOADS && get().queue.length > 0) {
+		activeMusicWorkers++;
+		void musicDownloadWorker(get, set);
 	}
 }
 

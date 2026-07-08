@@ -69,11 +69,15 @@ function buildPlaylistsTemplate(playlists: Playlist[]): ListTemplate {
 			const playlist = currentPlaylists[index];
 			if (!playlist) return;
 
-			const tracks = await fetchPlaylistTracks(playlist.key);
+			// Push the detail template immediately with a loading empty-view so the driver gets instant
+			// feedback; CarPlay auto-hides the empty view once we fill in the fetched tracks. Tracks are
+			// captured in a mutable closure so row selection uses the resolved list.
+			let tracks: Song[] = [];
 			const detailTemplate = new ListTemplate({
 				title: playlist.title,
-				sections: [{ items: tracks.map(songToListItem) }],
-				emptyViewTitleVariants: ['Empty Playlist'],
+				sections: [],
+				emptyViewTitleVariants: ['Loading…'],
+				emptyViewSubtitleVariants: ['Fetching tracks'],
 				async onItemSelect({ index: trackIndex }: { templateId: string; index: number }) {
 					const song = tracks[trackIndex];
 					if (song) {
@@ -83,12 +87,34 @@ function buildPlaylistsTemplate(playlists: Playlist[]): ListTemplate {
 			});
 
 			CarPlay.pushTemplate(detailTemplate, true);
+
+			try {
+				tracks = await fetchPlaylistTracks(playlist.key);
+				detailTemplate.updateSections([{ items: tracks.map(songToListItem) }]);
+			} catch {
+				// Leave the list empty; the empty view communicates that nothing loaded.
+				detailTemplate.updateSections([]);
+			}
 		},
 	});
 	return template;
 }
 
+function rebuildLists() {
+	const { recentlyPlayed, playlists } = useLibraryStore.getState();
+	recentlyPlayedList?.updateSections([{ items: recentlyPlayed.map(songToListItem) }]);
+	playlistsList?.updateSections([{ items: playlists.map(playlistToListItem) }]);
+}
+
 function onConnect() {
+	// `checkForConnection()` can fire `didConnect` before our callback is registered, so setupCarPlay
+	// also invokes this directly for the already-connected case. Guard against building the templates
+	// (and stacking subscriptions) twice.
+	if (storeUnsubscribers.length > 0) {
+		rebuildLists();
+		return;
+	}
+
 	const { recentlyPlayed, playlists } = useLibraryStore.getState();
 
 	recentlyPlayedList = buildRecentlyPlayedTemplate(recentlyPlayed);
@@ -103,7 +129,9 @@ function onConnect() {
 	CarPlay.setRootTemplate(tabBar, false);
 	CarPlay.enableNowPlaying(true);
 
-	// Keep CarPlay lists in sync with store changes
+	// Keep CarPlay lists in sync with store changes. When CarPlay is plugged in at launch, the library
+	// usually hydrates *after* connect, so these subscriptions are what populate the initially empty
+	// lists once data arrives.
 	const unsubRecent = useLibraryStore.subscribe((state, prev) => {
 		if (state.recentlyPlayed !== prev.recentlyPlayed) {
 			recentlyPlayedList?.updateSections([{ items: state.recentlyPlayed.map(songToListItem) }]);
@@ -130,6 +158,11 @@ export function setupCarPlay() {
 	if (Platform.OS !== 'ios') return;
 	CarPlay.registerOnConnect(onConnect);
 	CarPlay.registerOnDisconnect(onDisconnect);
+	// If CarPlay was already connected before this ran (app launched while plugged in), the initial
+	// `didConnect` fired before registration — build the templates now.
+	if (CarPlay.connected) {
+		onConnect();
+	}
 }
 
 export function teardownCarPlay() {

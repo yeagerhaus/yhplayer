@@ -123,7 +123,7 @@ export class PlexAuthService {
 				throw new Error('Invalid response format from Plex API');
 			}
 
-			console.log(`✅ PIN requested: ${pinCode} (ID: ${pinId})`);
+			// console.log(`✅ PIN requested: ${pinCode} (ID: ${pinId})`);
 
 			return {
 				success: true,
@@ -302,7 +302,7 @@ export class PlexAuthService {
 			// Save to storage
 			this.saveAuthState();
 
-			console.log('✅ Login successful!');
+			// console.log('✅ Login successful!');
 			console.log(`   User: ${userInfo.username}`);
 			console.log(`   Servers: ${discoveryResult.servers.length}`);
 			console.log(`   Selected: ${recommendedServer?.name || 'None'}`);
@@ -387,7 +387,7 @@ export class PlexAuthService {
 		this.authState.selectedServer = server;
 		this.saveAuthState();
 
-		console.log(`✅ Selected server: ${server.name}`);
+		// console.log(`✅ Selected server: ${server.name}`);
 		return true;
 	}
 
@@ -462,7 +462,7 @@ export class PlexAuthService {
 
 		await plexDiscoveryService.clearCache();
 
-		console.log('✅ Logged out successfully');
+		// console.log('✅ Logged out successfully');
 	}
 
 	/**
@@ -485,7 +485,7 @@ export class PlexAuthService {
 						if (userInfo.avatarUrl) this.authState.avatarUrl = userInfo.avatarUrl;
 						this.saveAuthState();
 
-						console.log('✅ Loaded authentication state from storage');
+						// console.log('✅ Loaded authentication state from storage');
 
 						// If persisted server is missing connections (old format), refresh before proceeding
 						if (this.authState.selectedServer && !this.authState.selectedServer.connections?.length) {

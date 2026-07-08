@@ -3,7 +3,7 @@ import { InteractionManager } from 'react-native';
 import ImageColors from 'react-native-image-colors';
 import { create } from 'zustand';
 import { getStreamingPlaybackBitrateKbps } from '@/hooks/usePlaybackSettingsStore';
-import { computeCrossfadeDuration } from '@/lib/crossfadeAlgorithm';
+import { computeCrossfadeDuration, computeIncomingLoudnessTrim } from '@/lib/crossfadeAlgorithm';
 import { getCachedNetworkPlaybackRoute } from '@/lib/networkPlaybackRoute';
 import TrackPlayer, {
 	Capability,
@@ -242,7 +242,7 @@ function getProgressStore() {
 function songToTrack(song: Song) {
 	const localUri = song.localUri || getDownloadsStore().getState().getLocalUri(song.id);
 	if (__DEV__ && !localUri) {
-		console.log(`[songToTrack] No localUri for ${song.id}, using remote URL`);
+		// console.log(`[songToTrack] No localUri for ${song.id}, using remote URL`);
 	}
 	const url = localUri || (typeof song.uri === 'string' && song.uri.trim().length > 0 ? song.uri : null);
 	if (song.source === 'podcast' && !url) {
@@ -264,7 +264,7 @@ function songToTrack(song: Song) {
 			const built = buildPlexStreamUrl(song, referenceUrl, bitrate);
 			finalUrl = built.url;
 			directUrl = built.directUrl;
-			console.log(`[songToTrack] Plex remote stream ${song.id} @ ${bitrate} kbps`);
+			// console.log(`[songToTrack] Plex remote stream ${song.id} @ ${bitrate} kbps`);
 		}
 	}
 
@@ -281,9 +281,6 @@ function songToTrack(song: Song) {
 	};
 }
 
-/** Pending resume: seek is deferred until first progress (fixes local/downloaded files where seek before play() is ignored). */
-let pendingPodcastResume: { songId: string; position: number } | null = null;
-
 /** Resume position for a podcast: for downloaded episodes use the download record (resumeAt); otherwise progress store. */
 function getPodcastResumePosition(song: Song): number | undefined {
 	const { usePodcastDownloadsStore } = require('@/hooks/usePodcastDownloadsStore');
@@ -298,13 +295,16 @@ function getPodcastResumePosition(song: Song): number | undefined {
 	return undefined;
 }
 
-/** If current song is a podcast with saved progress, schedule resume. For downloaded episodes we use the download's resumeAt. */
+/**
+ * If current song is a podcast with saved progress, resume from it. The native podcast backend
+ * (AVPlayer) applies the seek as soon as the item is ready, so a single seekTo is reliable even
+ * before playback has actually started (no deferred re-seek needed).
+ */
 async function maybeResumePodcast(song: Song): Promise<void> {
 	if (song.source !== 'podcast') return;
 	const position = getPodcastResumePosition(song);
 	if (position == null) return;
 	await TrackPlayer.seekTo(position);
-	pendingPodcastResume = { songId: song.id, position };
 }
 
 // Podcast progress: debounced save while playing (latest position), immediate save on pause
@@ -556,9 +556,11 @@ export const useAudioStore = create<AudioState>((set, get) => ({
 					0,
 					queue.findIndex((s) => s.id === currentSong!.id),
 				);
-				await TrackPlayer.skip(trackIndex);
-				if (position > 0) await TrackPlayer.seekTo(position);
-				await TrackPlayer.pause();
+				// Load the track paused at the saved position atomically. The native `skip` runs an async
+				// load/prime; passing startPaused/startAtSeconds lets it seek and stay paused INSIDE that
+				// task, avoiding the race where a separate pause() ran before load finished and playback
+				// then auto-started (and reset position to 0).
+				await TrackPlayer.skip(trackIndex, { startPaused: true, startAtSeconds: position > 0 ? position : undefined });
 				restoredPausedAt = Date.now();
 			} finally {
 				set({ _isRestoringPlayback: false });
@@ -577,7 +579,7 @@ export const useAudioStore = create<AudioState>((set, get) => ({
 			if (isPartialRestore) {
 				console.log('⚠️ Partial restore (library not cached): showing last track, full queue pending');
 			} else {
-				console.log(`✅ Restored playback state (${queue.length} tracks)`);
+				// console.log(`✅ Restored playback state (${queue.length} tracks)`);
 			}
 		} catch (err) {
 			console.warn('Failed to restore playback state:', err);
@@ -1081,14 +1083,6 @@ export function useTrackPlayerSync() {
 				progressStore.setDuration(duration);
 				lastProgressTimestamp = Date.now();
 
-				// Deferred podcast resume: for downloaded/local files, seek before play() is often ignored; seek now if we're still near 0.
-				if (pendingPodcastResume) {
-					if (state.currentSong?.id === pendingPodcastResume.songId && position < 10) {
-						await TrackPlayer.seekTo(pendingPodcastResume.position);
-					}
-					pendingPodcastResume = null;
-				}
-
 				// Sleep timer: stop playback when time is up
 				const { sleepTimerEndsAt } = useAudioStore.getState();
 				if (sleepTimerEndsAt != null && Date.now() >= sleepTimerEndsAt) {
@@ -1113,17 +1107,19 @@ export function useTrackPlayerSync() {
 							minDuration: 1,
 							maxDuration: 12,
 						};
+						const outLoudness = effectiveLoudnessData(state.currentSong);
+						const inLoudness = effectiveLoudnessData(nextSong);
 						const sec = pbs.crossfadeAdaptiveEnabled
-							? computeCrossfadeDuration(
-									effectiveLoudnessData(state.currentSong),
-									effectiveLoudnessData(nextSong),
-									baseConfig,
-								)
+							? computeCrossfadeDuration(outLoudness, inLoudness, baseConfig)
 							: pbs.crossfadeDurationSec;
-						const sig = `${state.currentSong.id}|${nextSong.id}|${sec.toFixed(2)}`;
+						// Gain-match the incoming track during the overlap (only when Adaptive is on, since it
+						// relies on the same loudness metadata). Reset to 1 otherwise so a stale trim can't linger.
+						const trim = pbs.crossfadeAdaptiveEnabled ? computeIncomingLoudnessTrim(outLoudness, inLoudness) : 1;
+						const sig = `${state.currentSong.id}|${nextSong.id}|${sec.toFixed(2)}|${trim.toFixed(3)}`;
 						if (sig !== lastCrossfadeSignature) {
 							lastCrossfadeSignature = sig;
 							TrackPlayer.setNextCrossfadeDuration(sec).catch(() => {});
+							TrackPlayer.setNextCrossfadeTrim(trim).catch(() => {});
 						}
 					}
 				}
@@ -1167,7 +1163,6 @@ export function useTrackPlayerSync() {
 			}
 
 			if (event.type === Event.PlaybackActiveTrackChanged) {
-				pendingPodcastResume = null; // no longer applicable to previous track
 				// Use the event index + our Zustand queue — no native bridge calls needed
 				const trackIndex = event.index;
 				if (trackIndex == null || trackIndex < 0 || trackIndex >= state.queue.length) return;
@@ -1223,7 +1218,7 @@ export function useTrackPlayerSync() {
 						try {
 							await TrackPlayer.skip(trackIndex);
 							await TrackPlayer.play();
-							console.log('✅ Retry succeeded');
+							// console.log('✅ Retry succeeded');
 						} catch {
 							console.warn('Retry failed, keeping player state intact');
 							useAudioStore.setState({ isPlaying: false });
@@ -1240,7 +1235,7 @@ export function useTrackPlayerSync() {
 							state._setCurrentSong(nextSong);
 							await TrackPlayer.skip(nextIndex);
 							await TrackPlayer.play();
-							console.log(`✅ Skipped failed track → ${nextSong.id}`);
+							// console.log(`✅ Skipped failed track → ${nextSong.id}`);
 						} catch {
 							useAudioStore.setState({ isPlaying: false });
 						}

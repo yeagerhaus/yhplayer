@@ -88,12 +88,34 @@ final class AudioEnginePlayer {
 				idleNode.stop()
 				idleNode.volume = 0
 				activeNode.volume = _volume
+				resetLowpassFilters()
 			}
 		}
 	}
 
 	/// JS-computed overlap length for the upcoming transition.
 	var nextCrossfadeDuration: TimeInterval = 4.0
+
+	/// Volume ramp shape used during a crossfade overlap.
+	enum CrossfadeCurve: Int {
+		case equalPower = 0 // constant-power (sqrt) — safe default
+		case linear = 1 // constant-amplitude
+		case logarithmic = 2 // slower onset / quicker tail, more track separation
+		case sCurve = 3 // smoothstep-shaped equal-power
+	}
+	var crossfadeCurve: CrossfadeCurve = .equalPower
+
+	/// Linear gain applied to the incoming deck at the START of the overlap so it enters matched to the
+	/// outgoing track's loudness (JS derives it from Plex loudness). It interpolates back to 1.0 by the
+	/// end of the ramp so the track settles at its natural level with no post-crossfade jump.
+	var nextIncomingTrim: Float = 1.0
+
+	/// Sweep a lowpass down on the outgoing deck across the crossfade tail for a more musical blend.
+	var crossfadeLowpassTailEnabled: Bool = true
+
+	/// User-initiated skips fade the incoming track in instead of hard-cutting.
+	var fadeInOnManualSkip: Bool = true
+	var manualSkipFadeDuration: TimeInterval = 0.5
 
 	private(set) var currentTrackId: String?
 	private var currentFile: AVAudioFile?
@@ -114,6 +136,18 @@ final class AudioEnginePlayer {
 	private var crossfadeRampDurationActive: TimeInterval = 0
 	private var crossfadeOutgoingIsA: Bool = true
 	private var finishedTrackIdForRamp: String?
+	private var crossfadeRampIncomingTrim: Float = 1.0
+
+	/// Per-deck lowpass inserted between each deck and the mixer. Bypassed (transparent) except while a
+	/// crossfade tail is sweeping the outgoing deck.
+	private var lowpassA: AVAudioUnitEQ?
+	private var lowpassB: AVAudioUnitEQ?
+
+	// Manual-skip fade-in ramp state (separate from the crossfade ramp).
+	private var fadeInLink: CADisplayLink?
+	private var fadeInStartTime: CFTimeInterval = 0
+	private var fadeInDuration: TimeInterval = 0
+	private var fadeInDeckIsA: Bool = true
 
 	private var _isPlaying = false
 	private var _volume: Float = 1.0
@@ -122,6 +156,23 @@ final class AudioEnginePlayer {
 	private var playGeneration: UInt64 = 0
 	private var trackEndWallTime: Double = 0
 	private var cachedPlaybackSeconds: Double = 0
+
+	// MARK: - Streaming (remote, progressive) state
+	//
+	// When a remote track isn't already cached we stream it: a `StreamingAudioSource` produces LPCM
+	// buffers that a background pump schedules onto the active deck, so audio starts after a short
+	// prebuffer instead of a full download. Crossfade/gapless preloading stay on the file path.
+	private var streamingSource: StreamingAudioSource?
+	private var isStreaming = false
+	private var streamReadFormat: AVAudioFormat?
+	private var streamingDuration: Double = 0
+	private let streamPumpQueue = DispatchQueue(label: "com.yhwav.stream-pump")
+	private var streamPumpTimer: DispatchSourceTimer?
+	/// Pump-queue-only state (never touch off `streamPumpQueue`).
+	private var streamInFlight = 0
+	private var streamSchedulingComplete = false
+	private let streamReadBufferSize: AVAudioFrameCount = 8192
+	private let maxInFlightStreamBuffers = 16
 
 	private var interruptionObserver: NSObjectProtocol?
 	private var routeChangeObserver: NSObjectProtocol?
@@ -146,9 +197,15 @@ final class AudioEnginePlayer {
 		deckB = AVAudioPlayerNode()
 		mixerNode = AVAudioMixerNode()
 		timePitchNode = AVAudioUnitTimePitch()
+		let lpA = Self.makeLowpass()
+		let lpB = Self.makeLowpass()
+		lowpassA = lpA
+		lowpassB = lpB
 
 		engine.attach(deckA)
 		engine.attach(deckB)
+		engine.attach(lpA)
+		engine.attach(lpB)
 		engine.attach(mixerNode)
 		engine.attach(timePitchNode)
 
@@ -169,18 +226,22 @@ final class AudioEnginePlayer {
 		if let unit = createdUnit {
 			dspNode = unit
 			engine.attach(unit)
-			engine.connect(deckA, to: mixerNode, format: format)
-			engine.connect(deckB, to: mixerNode, format: format)
+			engine.connect(deckA, to: lpA, format: format)
+			engine.connect(deckB, to: lpB, format: format)
+			engine.connect(lpA, to: mixerNode, format: format)
+			engine.connect(lpB, to: mixerNode, format: format)
 			engine.connect(mixerNode, to: timePitchNode, format: format)
 			engine.connect(timePitchNode, to: unit, format: format)
 			engine.connect(unit, to: engine.mainMixerNode, format: format)
-			print("YhwavAudio: engine setup dual-deck+mixer+DSP format=\(format.sampleRate)Hz/\(format.channelCount)ch")
+			print("YhwavAudio: engine setup dual-deck+lowpass+mixer+DSP format=\(format.sampleRate)Hz/\(format.channelCount)ch")
 		} else {
-			engine.connect(deckA, to: mixerNode, format: format)
-			engine.connect(deckB, to: mixerNode, format: format)
+			engine.connect(deckA, to: lpA, format: format)
+			engine.connect(deckB, to: lpB, format: format)
+			engine.connect(lpA, to: mixerNode, format: format)
+			engine.connect(lpB, to: mixerNode, format: format)
 			engine.connect(mixerNode, to: timePitchNode, format: format)
 			engine.connect(timePitchNode, to: engine.mainMixerNode, format: format)
-			print("YhwavAudio: engine setup dual-deck+mixer (no DSP) format=\(format.sampleRate)Hz/\(format.channelCount)ch")
+			print("YhwavAudio: engine setup dual-deck+lowpass+mixer (no DSP) format=\(format.sampleRate)Hz/\(format.channelCount)ch")
 		}
 
 		deckB.volume = 0
@@ -198,7 +259,9 @@ final class AudioEnginePlayer {
 
 	func teardown() {
 		print("YhwavAudio: engine teardown")
+		cancelActiveDeckFadeIn()
 		cancelCrossfadeRamp()
+		stopStreaming()
 		playGeneration &+= 1
 		stopLevelTap()
 		removeInterruptionObservers()
@@ -210,6 +273,8 @@ final class AudioEnginePlayer {
 		if let e = engine {
 			if let n = deckA { e.detach(n) }
 			if let n = deckB { e.detach(n) }
+			if let n = lowpassA { e.detach(n) }
+			if let n = lowpassB { e.detach(n) }
 			if let n = mixerNode { e.detach(n) }
 			if let n = timePitchNode { e.detach(n) }
 			if let n = dspNode { e.detach(n) }
@@ -218,6 +283,8 @@ final class AudioEnginePlayer {
 		engine = nil
 		deckA = nil
 		deckB = nil
+		lowpassA = nil
+		lowpassB = nil
 		mixerNode = nil
 		timePitchNode = nil
 		dspNode = nil
@@ -240,10 +307,10 @@ final class AudioEnginePlayer {
 	// MARK: - Crossfade tick (from module progress timer)
 
 	func tickCrossfadeIfNeeded() {
-		guard crossfadeEnabled, _isPlaying, !crossfadeInProgress, crossfadeIdleReady else { return }
 		let dur = currentDuration
-		guard dur > 0, nextCrossfadeDuration > 0 else { return }
 		let remaining = dur - currentPosition
+		guard crossfadeEnabled, _isPlaying, !crossfadeInProgress, crossfadeIdleReady else { return }
+		guard dur > 0, nextCrossfadeDuration > 0 else { return }
 		if remaining <= nextCrossfadeDuration {
 			beginCrossfadeRamp()
 		}
@@ -267,17 +334,19 @@ final class AudioEnginePlayer {
 		}
 	}
 
-	func play(url: URL, trackId: String, expectedDurationSeconds: Double? = nil, fallbackURL: URL? = nil) async throws {
+	func play(url: URL, trackId: String, expectedDurationSeconds: Double? = nil, fallbackURL: URL? = nil, startPaused: Bool = false, startAtSeconds: Double? = nil, fadeInSeconds: Double = 0) async throws {
 		guard let deckA = deckA, let engine = engine else { return }
 
 		playGeneration &+= 1
 		let gen = playGeneration
 
+		cancelActiveDeckFadeIn()
 		cancelCrossfadeRamp()
 		crossfadeInProgress = false
 		crossfadeIdleReady = false
 		crossfadeIdleFile = nil
 		crossfadeIdleTrackId = nil
+		stopStreaming()
 		deckA.stop()
 		deckB.stop()
 		isNextScheduled = false
@@ -288,6 +357,24 @@ final class AudioEnginePlayer {
 		deckB.volume = 0
 
 		print("YhwavAudio: play trackId=\(trackId)")
+
+		// Prefer progressive streaming for remote tracks that aren't already on disk, so playback starts
+		// after a short prebuffer. Any failure falls through to the full-download path below.
+		//
+		// Stream the DIRECT original file (`fallbackURL`) rather than the Plex universal transcoder: the
+		// transcoder returns a truncated body with no Content-Length and closes after a few seconds, which
+		// the stream reader correctly interprets as end-of-track (causing auto-skips). The original is a
+		// static file with a real Content-Length and range support, so it streams reliably.
+		let streamURL = fallbackURL ?? url
+		if !streamURL.isFileURL && !fileCache.hasCached(trackId: trackId) {
+			do {
+				try await playStreaming(url: streamURL, trackId: trackId, expectedDurationSeconds: expectedDurationSeconds, gen: gen, startPaused: startPaused, startAtSeconds: startAtSeconds, fadeInSeconds: fadeInSeconds)
+				return
+			} catch {
+				guard gen == playGeneration else { return }
+				print("YhwavAudio: stream failed trackId=\(trackId), falling back to download: \(error.localizedDescription)")
+			}
+		}
 
 		let file: AVAudioFile
 		do {
@@ -310,22 +397,42 @@ final class AudioEnginePlayer {
 
 		currentFile = file
 		currentTrackId = trackId
-		currentFrameOffset = 0
+		let sampleRate = file.processingFormat.sampleRate
+		// Start offset (e.g. restoring saved playback position): schedule a segment from that frame.
+		let startFrame: AVAudioFramePosition = {
+			guard let s = startAtSeconds, s > 0 else { return 0 }
+			return max(0, min(AVAudioFramePosition(s * sampleRate), file.length - 1))
+		}()
+		currentFrameOffset = startFrame
 		playerTimeBaseOffset = 0
-		cachedPlaybackSeconds = 0
+		cachedPlaybackSeconds = Double(startFrame) / sampleRate
 
-		let frameCount = AVAudioFrameCount(file.length)
-		let duration = Double(file.length) / file.processingFormat.sampleRate
-		print("YhwavAudio: schedule trackId=\(trackId) duration=\(String(format: "%.1f", duration))s frames=\(frameCount) (current)")
+		let duration = Double(file.length) / sampleRate
+		print("YhwavAudio: schedule trackId=\(trackId) duration=\(String(format: "%.1f", duration))s startFrame=\(startFrame) startPaused=\(startPaused) (current)")
 
-		deckA.scheduleFile(file, at: nil, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-			DispatchQueue.main.async {
-				self?.handleTrackCompletion(trackId: trackId, generation: gen)
+		if startFrame > 0 {
+			let remainingFrames = AVAudioFrameCount(file.length - startFrame)
+			deckA.scheduleSegment(file, startingFrame: startFrame, frameCount: remainingFrames, at: nil, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+				DispatchQueue.main.async {
+					self?.handleTrackCompletion(trackId: trackId, generation: gen)
+				}
+			}
+		} else {
+			deckA.scheduleFile(file, at: nil, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+				DispatchQueue.main.async {
+					self?.handleTrackCompletion(trackId: trackId, generation: gen)
+				}
 			}
 		}
 
-		deckA.play()
-		_isPlaying = true
+		// Restore/prepare loads a track without starting playback; only start the deck when not paused.
+		if startPaused {
+			_isPlaying = false
+		} else {
+			deckA.play()
+			_isPlaying = true
+			if fadeInSeconds > 0 { beginActiveDeckFadeIn(duration: fadeInSeconds) }
+		}
 		timePitchNode.rate = _rate
 
 		DispatchQueue.main.async { [weak self] in
@@ -333,9 +440,236 @@ final class AudioEnginePlayer {
 		}
 	}
 
+	// MARK: - Streaming path
+
+	/// True while the current track is being progressively streamed (as opposed to played from a
+	/// complete on-disk file). The module uses this to avoid preloading the next track onto a deck
+	/// that's busy with streamed buffers.
+	var isCurrentStreaming: Bool { isStreaming }
+	var isPlaying: Bool { _isPlaying }
+	/// The next track already prepared for a seamless transition — either preloaded on the idle deck
+	/// (crossfade) or scheduled gaplessly on the active deck. nil if nothing is prepared yet, which tells
+	/// the module to (re)attempt preparation once the file is cached.
+	var preparedNextTrackId: String? {
+		if crossfadeIdleReady { return crossfadeIdleTrackId }
+		if isNextScheduled { return nextTrackId }
+		return nil
+	}
+
+	private func playStreaming(url: URL, trackId: String, expectedDurationSeconds: Double?, gen: UInt64, startPaused: Bool = false, startAtSeconds: Double? = nil, fadeInSeconds: Double = 0) async throws {
+		guard let deckA = deckA, let engine = engine else {
+			throw NSError(domain: "AudioEnginePlayer", code: -10, userInfo: [NSLocalizedDescriptionKey: "Engine unavailable"])
+		}
+
+		// Canonical LPCM format at the hardware sample rate so scheduled buffers match the deck's
+		// connection without an extra mixer conversion.
+		let hwRate = engine.mainMixerNode.outputFormat(forBus: 0).sampleRate
+		let sr = hwRate > 0 ? hwRate : 44100
+		guard let readFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sr, channels: 2, interleaved: false) else {
+			throw NSError(domain: "AudioEnginePlayer", code: -11, userInfo: [NSLocalizedDescriptionKey: "Bad read format"])
+		}
+
+		guard let source = StreamingAudioSource(url: url, trackId: trackId, readFormat: readFormat, cacheDir: fileCache.cacheDirectory) else {
+			throw NSError(domain: "AudioEnginePlayer", code: -12, userInfo: [NSLocalizedDescriptionKey: "Could not open stream"])
+		}
+
+		source.start()
+		do {
+			try await source.prime(minimumSeconds: 2.0, timeout: 25)
+		} catch {
+			source.cancel()
+			throw error
+		}
+
+		guard gen == playGeneration else {
+			source.cancel()
+			return
+		}
+
+		reconnectIfNeeded(toFormat: readFormat)
+		if !engine.isRunning { try engine.start() }
+
+		streamingSource = source
+		streamReadFormat = readFormat
+		isStreaming = true
+		currentFile = nil
+		currentTrackId = trackId
+		currentFrameOffset = 0
+		playerTimeBaseOffset = 0
+		cachedPlaybackSeconds = 0
+		let parsedDuration = source.duration
+		streamingDuration = parsedDuration > 0 ? parsedDuration : (expectedDurationSeconds ?? 0)
+		activeDeckIsA = true
+		deckA.volume = _volume
+		deckB?.volume = 0
+
+		// Start offset (e.g. restoring saved playback position): seek the source before pumping so the
+		// first scheduled buffers begin at the saved position rather than the top of the file.
+		if let s = startAtSeconds, s > 0 {
+			let clamped = streamingDuration > 0 ? min(s, streamingDuration) : s
+			source.seek(toTime: clamped)
+			currentFrameOffset = AVAudioFramePosition(clamped * sr)
+			cachedPlaybackSeconds = clamped
+		}
+
+		streamPumpQueue.sync {
+			streamInFlight = 0
+			streamSchedulingComplete = false
+			pumpStream(gen: gen)
+		}
+
+		// Restore/prepare loads a track without starting playback; only start the deck when not paused.
+		if startPaused {
+			_isPlaying = false
+		} else {
+			deckA.play()
+			_isPlaying = true
+			if fadeInSeconds > 0 { beginActiveDeckFadeIn(duration: fadeInSeconds) }
+		}
+		timePitchNode.rate = _rate
+		startStreamPump(gen: gen)
+
+		print("YhwavAudio: stream start trackId=\(trackId) dur~=\(Int(streamingDuration))s @\(Int(sr))Hz startPaused=\(startPaused)")
+	}
+
+	private func startStreamPump(gen: UInt64) {
+		stopStreamPumpTimer()
+		let timer = DispatchSource.makeTimerSource(queue: streamPumpQueue)
+		timer.schedule(deadline: .now() + 0.1, repeating: 0.1)
+		timer.setEventHandler { [weak self] in self?.pumpStream(gen: gen) }
+		streamPumpTimer = timer
+		timer.resume()
+	}
+
+	private func stopStreamPumpTimer() {
+		streamPumpTimer?.cancel()
+		streamPumpTimer = nil
+	}
+
+	/// Runs on `streamPumpQueue`. Tops up the active deck with LPCM buffers up to the in-flight budget.
+	private func pumpStream(gen: UInt64) {
+		guard gen == playGeneration, isStreaming, let source = streamingSource else { return }
+		while streamInFlight < maxInFlightStreamBuffers {
+			switch source.read(frames: streamReadBufferSize) {
+			case .data(let buffer):
+				let node = activeNode
+				streamInFlight += 1
+				node.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+					guard let self = self else { return }
+					self.streamPumpQueue.async { self.onStreamBufferPlayed(gen: gen) }
+				}
+			case .waiting:
+				return
+			case .end:
+				streamSchedulingComplete = true
+				if streamInFlight == 0 {
+					let tid = currentTrackId
+					DispatchQueue.main.async { [weak self] in self?.handleStreamCompletion(trackId: tid, gen: gen) }
+				}
+				return
+			}
+		}
+	}
+
+	/// Runs on `streamPumpQueue`. A scheduled buffer finished playing.
+	private func onStreamBufferPlayed(gen: UInt64) {
+		guard gen == playGeneration, isStreaming else { return }
+		if streamInFlight > 0 { streamInFlight -= 1 }
+		if streamSchedulingComplete {
+			if streamInFlight == 0 {
+				let tid = currentTrackId
+				DispatchQueue.main.async { [weak self] in self?.handleStreamCompletion(trackId: tid, gen: gen) }
+			}
+		} else {
+			pumpStream(gen: gen)
+		}
+	}
+
+	private func handleStreamCompletion(trackId: String?, gen: UInt64) {
+		guard gen == playGeneration, isStreaming, let trackId = trackId, currentTrackId == trackId else { return }
+		// A crossfade out of this streaming track is already handling the handoff; let it finish so we
+		// don't double-fire didFinishTrack (which would make JS advance/reload on top of the crossfade).
+		if crossfadeInProgress { return }
+		stopStreamPumpTimer()
+		_isPlaying = false
+		// A stream that ended with an error (e.g. an unrecoverable connection drop) is NOT a finished
+		// track. Surfacing the error instead of firing didFinishTrack prevents the queue from rapidly
+		// auto-skipping through truncated downloads.
+		if let err = streamingSource?.error {
+			let msg = err.localizedDescription
+			print("YhwavAudio: stream error trackId=\(trackId): \(msg)")
+			delegate?.enginePlayer(self, didEncounterError: msg, trackId: trackId)
+			return
+		}
+		if let done = streamingSource?.completedFileURL {
+			fileCache.registerCachedFile(trackId: trackId, fileURL: done)
+		}
+		trackEndWallTime = Date().timeIntervalSince1970 * 1000
+		print("YhwavAudio: stream ended trackId=\(trackId)")
+		delegate?.enginePlayer(self, didFinishTrack: trackId)
+	}
+
+	private func seekStreaming(to seconds: Double) {
+		guard let source = streamingSource, let deckA = deckA else { return }
+
+		playGeneration &+= 1
+		let gen = playGeneration
+		stopStreamPumpTimer()
+
+		let sr = streamReadFormat?.sampleRate ?? 44100
+		let clamped = max(0, streamingDuration > 0 ? min(seconds, streamingDuration) : seconds)
+		let wasPlaying = _isPlaying
+
+		let node = activeNode
+		node.stop()
+
+		streamPumpQueue.sync {
+			streamInFlight = 0
+			streamSchedulingComplete = false
+		}
+		source.seek(toTime: clamped)
+
+		currentFrameOffset = AVAudioFramePosition(clamped * sr)
+		playerTimeBaseOffset = 0
+		cachedPlaybackSeconds = clamped
+		deckA.volume = _volume
+		deckB?.volume = 0
+
+		streamPumpQueue.sync { self.pumpStream(gen: gen) }
+		if wasPlaying { node.play() }
+		startStreamPump(gen: gen)
+		print("YhwavAudio: stream seek to=\(String(format: "%.1f", clamped))s")
+	}
+
+	private func stopStreaming() {
+		guard isStreaming || streamingSource != nil else { return }
+		stopStreamPumpTimer()
+		if let src = streamingSource {
+			if let done = src.completedFileURL, let tid = currentTrackId {
+				fileCache.registerCachedFile(trackId: tid, fileURL: done)
+			}
+			src.cancel()
+		}
+		streamingSource = nil
+		isStreaming = false
+		streamReadFormat = nil
+		streamingDuration = 0
+		streamPumpQueue.sync {
+			streamInFlight = 0
+			streamSchedulingComplete = false
+		}
+	}
+
 	func scheduleNext(url: URL, trackId: String, expectedDurationSeconds: Double? = nil, fallbackURL: URL? = nil, forceGapless: Bool = false) async throws {
 		guard deckA != nil else { return }
 		let gen = playGeneration
+
+		// Never disturb an in-progress crossfade, and skip redundant re-preparation of the same track.
+		// scheduleNextTrack is re-attempted on every progress tick (until the next track is cached), so
+		// these guards prevent thrashing the idle deck (crossfade) or double-scheduling (gapless).
+		if crossfadeInProgress { return }
+		if crossfadeEnabled, !forceGapless, crossfadeIdleReady, crossfadeIdleTrackId == trackId { return }
+		if (!crossfadeEnabled || forceGapless), isNextScheduled, nextTrackId == trackId { return }
 
 		let file: AVAudioFile
 		do {
@@ -399,6 +733,7 @@ final class AudioEnginePlayer {
 
 	func clearScheduled() {
 		cancelCrossfadeRamp()
+		stopStreaming()
 		playGeneration &+= 1
 		deckA.stop()
 		deckB.stop()
@@ -450,6 +785,10 @@ final class AudioEnginePlayer {
 	}
 
 	func seek(to seconds: Double) {
+		if isStreaming {
+			seekStreaming(to: seconds)
+			return
+		}
 		guard let file = currentFile, let deckA = deckA, let deckB = deckB, let trackId = currentTrackId else { return }
 
 		cancelCrossfadeRamp()
@@ -507,9 +846,23 @@ final class AudioEnginePlayer {
 
 	// MARK: - State
 
-	var isPlaying: Bool { _isPlaying }
-
 	var currentPosition: Double {
+		if isStreaming {
+			let dur = currentDuration
+			let node = activeNode
+			guard let nodeTime = node.lastRenderTime,
+				  nodeTime.isSampleTimeValid,
+				  let playerTime = node.playerTime(forNodeTime: nodeTime) else {
+				return max(0, cachedPlaybackSeconds)
+			}
+			let sr = streamReadFormat?.sampleRate ?? playerTime.sampleRate
+			let frames = playerTime.sampleTime - playerTimeBaseOffset + currentFrameOffset
+			var pos = Double(frames) / sr
+			if dur > 0 { pos = min(pos, dur) }
+			let clamped = max(0, pos)
+			cachedPlaybackSeconds = clamped
+			return clamped
+		}
 		guard let file = currentFile else {
 			cachedPlaybackSeconds = 0
 			return 0
@@ -529,6 +882,11 @@ final class AudioEnginePlayer {
 	}
 
 	var currentDuration: Double {
+		if isStreaming {
+			// Parsed duration refines as more of the file downloads; keep the largest known estimate.
+			let parsed = streamingSource?.duration ?? 0
+			return max(streamingDuration, parsed)
+		}
 		guard let file = currentFile else { return 0 }
 		return Double(file.length) / file.processingFormat.sampleRate
 	}
@@ -565,6 +923,8 @@ final class AudioEnginePlayer {
 		crossfadeOutgoingIsA = activeDeckIsA
 		finishedTrackIdForRamp = outgoing
 		crossfadeRampDurationActive = max(0.1, nextCrossfadeDuration)
+		crossfadeRampIncomingTrim = max(0.1, min(4.0, nextIncomingTrim))
+		resetLowpassFilters()
 
 		let inc = idleNode
 		let out = activeNode
@@ -580,7 +940,22 @@ final class AudioEnginePlayer {
 		CrossfadeRampProxy.shared.player = self
 		link.add(to: .main, forMode: .common)
 		crossfadeRampLink = link
-		print("YhwavAudio: crossfade ramp start \(outgoing) → \(idleId) over \(crossfadeRampDurationActive)s")
+		print("YhwavAudio: crossfade ramp start \(outgoing) → \(idleId) over \(crossfadeRampDurationActive)s curve=\(crossfadeCurve.rawValue) trim=\(crossfadeRampIncomingTrim)")
+	}
+
+	/// Volume multipliers for the outgoing/incoming decks at normalized progress `s` (0…1).
+	private func crossfadeCurveGains(_ s: Float) -> (out: Float, inc: Float) {
+		switch crossfadeCurve {
+		case .equalPower:
+			return (sqrtf(1.0 - s), sqrtf(s))
+		case .linear:
+			return (1.0 - s, s)
+		case .logarithmic:
+			return ((1.0 - s) * (1.0 - s), s * s)
+		case .sCurve:
+			let e = s * s * (3.0 - 2.0 * s) // smoothstep
+			return (sqrtf(1.0 - e), sqrtf(e))
+		}
 	}
 
 	fileprivate func crossfadeRampStep() {
@@ -591,8 +966,12 @@ final class AudioEnginePlayer {
 			return
 		}
 		let s = Float(t)
-		let outVol = sqrtf(1.0 - s) * _volume
-		let inVol = sqrtf(s) * _volume
+		let (outCurve, inCurve) = crossfadeCurveGains(s)
+		// Gain-match: the incoming deck enters at `trim` (matched to the outgoing loudness) and eases
+		// back to its natural level (1.0) by the end so there's no jump when the crossfade completes.
+		let trim = crossfadeRampIncomingTrim + (1.0 - crossfadeRampIncomingTrim) * s
+		let outVol = outCurve * _volume
+		let inVol = inCurve * _volume * trim
 		if crossfadeOutgoingIsA {
 			deckA.volume = outVol
 			deckB.volume = inVol
@@ -600,10 +979,79 @@ final class AudioEnginePlayer {
 			deckB.volume = outVol
 			deckA.volume = inVol
 		}
+		if crossfadeLowpassTailEnabled {
+			updateOutgoingLowpass(progress: s)
+		}
+	}
+
+	/// Sweeps the outgoing deck's lowpass from transparent down into the low-mids across the tail.
+	private func updateOutgoingLowpass(progress s: Float) {
+		guard let band = (crossfadeOutgoingIsA ? lowpassA : lowpassB)?.bands.first else { return }
+		band.bypass = false
+		let maxHz: Float = 18000
+		let minHz: Float = 1200
+		band.frequency = maxHz - (maxHz - minHz) * s
+	}
+
+	private func resetLowpassFilters() {
+		for band in [lowpassA?.bands.first, lowpassB?.bands.first] {
+			band?.bypass = true
+			band?.frequency = 20000
+		}
+	}
+
+	private static func makeLowpass() -> AVAudioUnitEQ {
+		let eq = AVAudioUnitEQ(numberOfBands: 1)
+		if let band = eq.bands.first {
+			band.filterType = .lowPass
+			band.frequency = 20000
+			band.bypass = true
+		}
+		return eq
+	}
+
+	// MARK: - Manual-skip fade-in
+
+	/// Ramps the active deck's volume 0 → `_volume` so a user-initiated skip eases in instead of
+	/// hard-cutting. Runs independently of the crossfade ramp.
+	private func beginActiveDeckFadeIn(duration: TimeInterval) {
+		cancelActiveDeckFadeIn()
+		guard duration > 0 else { return }
+		fadeInDeckIsA = activeDeckIsA
+		fadeInDuration = duration
+		fadeInStartTime = CACurrentMediaTime()
+		activeNode.volume = 0
+		let link = CADisplayLink(target: DeckFadeProxy.shared, selector: #selector(DeckFadeProxy.tick))
+		DeckFadeProxy.shared.player = self
+		link.add(to: .main, forMode: .common)
+		fadeInLink = link
+	}
+
+	fileprivate func fadeInStep() {
+		guard fadeInLink != nil, fadeInDuration > 0 else { return }
+		let node = fadeInDeckIsA ? deckA : deckB
+		let t = (CACurrentMediaTime() - fadeInStartTime) / fadeInDuration
+		if t >= 1.0 {
+			node?.volume = _volume
+			cancelActiveDeckFadeIn()
+			return
+		}
+		node?.volume = Float(t) * _volume
+	}
+
+	private func cancelActiveDeckFadeIn() {
+		fadeInLink?.invalidate()
+		fadeInLink = nil
+		DeckFadeProxy.shared.player = nil
 	}
 
 	private func finishCrossfadeRamp() {
 		cancelCrossfadeRamp()
+
+		// If we crossfaded OUT of a streaming track, tear the stream down before handing the active
+		// role to the idle (file) deck — otherwise the pump would start scheduling stream buffers onto
+		// the newly-active deck.
+		if isStreaming { stopStreaming() }
 
 		guard let finishedId = finishedTrackIdForRamp, let idleFile = crossfadeIdleFile, let idleId = crossfadeIdleTrackId else {
 			crossfadeInProgress = false
@@ -620,6 +1068,7 @@ final class AudioEnginePlayer {
 			deckB.volume = 0
 			deckA.volume = _volume
 		}
+		resetLowpassFilters()
 
 		activeDeckIsA = !activeDeckIsA
 		currentFile = idleFile
@@ -714,8 +1163,12 @@ final class AudioEnginePlayer {
 	// MARK: - Format handling
 
 	private func reconnectIfNeeded(for file: AVAudioFile) {
-		guard let engine = engine, let mixer = mixerNode, let timePitchNode = timePitchNode else { return }
-		let fileFormat = file.processingFormat
+		reconnectIfNeeded(toFormat: file.processingFormat)
+	}
+
+	private func reconnectIfNeeded(toFormat fileFormat: AVAudioFormat) {
+		guard let engine = engine, let mixer = mixerNode, let timePitchNode = timePitchNode,
+		      let lpA = lowpassA, let lpB = lowpassB else { return }
 		let currentFormat = deckA.outputFormat(forBus: 0)
 
 		let formatChanged = fileFormat.sampleRate != currentFormat.sampleRate || fileFormat.channelCount != currentFormat.channelCount
@@ -726,20 +1179,21 @@ final class AudioEnginePlayer {
 
 		engine.disconnectNodeOutput(deckA)
 		engine.disconnectNodeOutput(deckB)
+		engine.disconnectNodeOutput(lpA)
+		engine.disconnectNodeOutput(lpB)
 		engine.disconnectNodeOutput(mixer)
 		engine.disconnectNodeOutput(timePitchNode)
 
+		engine.connect(deckA, to: lpA, format: fileFormat)
+		engine.connect(deckB, to: lpB, format: fileFormat)
+		engine.connect(lpA, to: mixer, format: fileFormat)
+		engine.connect(lpB, to: mixer, format: fileFormat)
+		engine.connect(mixer, to: timePitchNode, format: fileFormat)
 		if let dsp = dspNode {
 			engine.disconnectNodeOutput(dsp)
-			engine.connect(deckA, to: mixer, format: fileFormat)
-			engine.connect(deckB, to: mixer, format: fileFormat)
-			engine.connect(mixer, to: timePitchNode, format: fileFormat)
 			engine.connect(timePitchNode, to: dsp, format: fileFormat)
 			engine.connect(dsp, to: engine.mainMixerNode, format: fileFormat)
 		} else {
-			engine.connect(deckA, to: mixer, format: fileFormat)
-			engine.connect(deckB, to: mixer, format: fileFormat)
-			engine.connect(mixer, to: timePitchNode, format: fileFormat)
 			engine.connect(timePitchNode, to: engine.mainMixerNode, format: fileFormat)
 		}
 
@@ -862,5 +1316,15 @@ private final class CrossfadeRampProxy: NSObject {
 
 	@objc func tick() {
 		player?.crossfadeRampStep()
+	}
+}
+
+// Separate proxy so a manual-skip fade-in can run without clobbering the crossfade ramp's target.
+private final class DeckFadeProxy: NSObject {
+	static let shared = DeckFadeProxy()
+	weak var player: AudioEnginePlayer?
+
+	@objc func tick() {
+		player?.fadeInStep()
 	}
 }

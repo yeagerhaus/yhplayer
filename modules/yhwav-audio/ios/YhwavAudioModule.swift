@@ -37,6 +37,10 @@ struct CrossfadeConfigRecord: Record {
 	@Field var maxDuration: Double = 8.0
 	@Field var fadeInOnManualSkip: Bool = true
 	@Field var manualSkipFadeDuration: Double = 0.5
+	/// Crossfade volume curve: 0 equal-power, 1 linear, 2 logarithmic, 3 S-curve.
+	@Field var curve: Int = 0
+	/// Sweep a lowpass on the outgoing deck during the crossfade tail.
+	@Field var lowpassTail: Bool = true
 }
 
 struct PlaybackStateRecord: Record {
@@ -364,6 +368,9 @@ final class AudioDSPState {
 
 public final class YhwavAudioModule: Module {
 	fileprivate var enginePlayer: AudioEnginePlayer?
+	fileprivate var podcastPlayer: PodcastPlayer?
+	/// When true, playback control routes to `podcastPlayer` (AVPlayer) instead of `enginePlayer`.
+	private var usingPodcastBackend = false
 	private var fileCache: AudioFileCache?
 	private var trackMetadata: [String: TrackRecord] = [:]
 	private var trackOrder: [String] = []
@@ -378,6 +385,10 @@ public final class YhwavAudioModule: Module {
 	private var lastEmittedState: String = "stopped"
 	private var suppressTrackChangeEvents = false
 	private var crossfadeUserEnabled = false
+	private var fadeInOnManualSkip = true
+	private var manualSkipFadeSeconds: Double = 0.5
+	/// Next track id whose idle-deck preload / gapless schedule is currently in flight (main-thread only).
+	private var preparingNextTrackId: String?
 
 	private lazy var nowPlayingManager = NowPlayingManager(module: self)
 
@@ -421,6 +432,9 @@ public final class YhwavAudioModule: Module {
 			player.setup()
 			player.crossfadeEnabled = self.crossfadeUserEnabled
 			self.enginePlayer = player
+			let podcast = PodcastPlayer()
+			podcast.delegate = self
+			self.podcastPlayer = podcast
 			self.nowPlayingManager.setupRemoteCommands()
 			self.isInitialized = true
 		}
@@ -463,6 +477,8 @@ public final class YhwavAudioModule: Module {
 				print("YhwavAudio: reset (had \(self.trackOrder.count) tracks)")
 				self.stopProgressTimer()
 				self.enginePlayer?.clearScheduled()
+				self.podcastPlayer?.stop()
+				self.usingPodcastBackend = false
 				self.trackMetadata.removeAll()
 				self.trackOrder.removeAll()
 				self.lastTrackEndTimestamp = 0
@@ -514,14 +530,37 @@ public final class YhwavAudioModule: Module {
 			}
 		}
 
-		AsyncFunction("skip") { (index: Int) in
-			guard let engine = self.enginePlayer, index >= 0, index < self.trackOrder.count else { return }
+		AsyncFunction("skip") { (index: Int, startPaused: Bool?, startAtSeconds: Double?) in
+			guard self.enginePlayer != nil, index >= 0, index < self.trackOrder.count else { return }
 			let currentIdx = self.currentActiveTrackIndex()
 			let targetId = self.trackOrder[index]
-			print("YhwavAudio: skip idx=\(currentIdx)→\(index) (trackId=\(targetId)), queueSize=\(self.trackOrder.count)")
+			let paused = startPaused ?? false
+			let startAt = (startAtSeconds ?? 0) > 0 ? startAtSeconds : nil
+			print("YhwavAudio: skip idx=\(currentIdx)→\(index) (trackId=\(targetId)), queueSize=\(self.trackOrder.count) paused=\(paused)")
 
 			guard let track = self.trackMetadata[targetId],
 				  let url = URL(string: track.url) else { return }
+
+			// Podcasts stream through the lightweight AVPlayer backend (instant seek, no full download).
+			// Set the routing flag synchronously so a `seekTo` issued right after `skip` (podcast resume)
+			// routes to the podcast backend before the async work below runs.
+			if track.crossfadeDisabled == true {
+				self.usingPodcastBackend = true
+				DispatchQueue.main.async {
+					self.enginePlayer?.clearScheduled()
+					self.podcastPlayer?.play(url: url, trackId: targetId, startAt: startAt, startPaused: paused)
+					self.emitActiveTrackChanged(index: index)
+					self.startProgressTimerIfNeeded()
+				}
+				return
+			}
+
+			// Music: engine backend. Leave the podcast backend if we were on it.
+			guard let engine = self.enginePlayer else { return }
+			if self.usingPodcastBackend {
+				DispatchQueue.main.async { self.podcastPlayer?.stop() }
+				self.usingPodcastBackend = false
+			}
 
 			var keepPrefetch: Set<String> = [targetId]
 			if index + 1 < self.trackOrder.count {
@@ -529,17 +568,26 @@ public final class YhwavAudioModule: Module {
 			}
 			self.fileCache?.cancelDownloads(exceptTrackIds: keepPrefetch)
 
+			// Manually selecting a track always plays at full volume immediately — no fade-in. Only natural
+			// end-of-track advancement crossfades (a separate path inside the engine).
 			Task {
 				do {
 					try await engine.play(
 						url: url,
 						trackId: targetId,
 						expectedDurationSeconds: self.expectedDurationSeconds(for: track),
-						fallbackURL: self.fallbackDirectURL(for: track)
+						fallbackURL: self.fallbackDirectURL(for: track),
+						startPaused: paused,
+						startAtSeconds: startAt
 					)
 					await MainActor.run {
 						self.emitActiveTrackChanged(index: index)
-						self.startProgressTimerIfNeeded()
+						if paused {
+							// Loaded but not playing (restore): don't run the progress timer.
+							self.syncNowPlaying()
+						} else {
+							self.startProgressTimerIfNeeded()
+						}
 						self.scheduleNextTrack(afterIndex: index)
 					}
 				} catch {
@@ -564,11 +612,18 @@ public final class YhwavAudioModule: Module {
 		}
 
 		AsyncFunction("setVolume") { (value: Float) in
-			self.enginePlayer?.volume = max(0, min(1, value))
+			let v = max(0, min(1, value))
+			self.enginePlayer?.volume = v
+			self.podcastPlayer?.setVolume(v)
 		}
 
 		AsyncFunction("setRate") { (value: Float) in
-			self.enginePlayer?.rate = max(0.5, min(2.0, value))
+			let v = max(0.5, min(2.0, value))
+			if self.usingPodcastBackend {
+				self.podcastPlayer?.setRate(v)
+			} else {
+				self.enginePlayer?.rate = v
+			}
 			DispatchQueue.main.async { self.syncNowPlaying() }
 		}
 
@@ -610,11 +665,21 @@ public final class YhwavAudioModule: Module {
 			if config.defaultDuration > 0 {
 				self.enginePlayer?.nextCrossfadeDuration = config.defaultDuration
 			}
+			self.enginePlayer?.crossfadeCurve = AudioEnginePlayer.CrossfadeCurve(rawValue: config.curve) ?? .equalPower
+			self.enginePlayer?.crossfadeLowpassTailEnabled = config.lowpassTail
+			self.fadeInOnManualSkip = config.fadeInOnManualSkip
+			self.manualSkipFadeSeconds = max(0, min(3.0, config.manualSkipFadeDuration))
+			self.enginePlayer?.fadeInOnManualSkip = config.fadeInOnManualSkip
+			self.enginePlayer?.manualSkipFadeDuration = self.manualSkipFadeSeconds
 		}
 
 		AsyncFunction("setNextCrossfadeDuration") { (seconds: Double) in
 			let clamped = max(0.1, min(30.0, seconds))
 			self.enginePlayer?.nextCrossfadeDuration = clamped
+		}
+
+		AsyncFunction("setNextCrossfadeTrim") { (trim: Double) in
+			self.enginePlayer?.nextIncomingTrim = Float(max(0.1, min(4.0, trim)))
 		}
 
 		Function("getPlaybackState") { () -> PlaybackStateRecord in
@@ -725,6 +790,7 @@ public final class YhwavAudioModule: Module {
 	// MARK: - Scheduling helpers
 
 	private func scheduleNextTrack(afterIndex idx: Int) {
+		guard !usingPodcastBackend else { return }
 		guard let engine = enginePlayer else { return }
 		let nextIdx = idx + 1
 		guard nextIdx < trackOrder.count else { return }
@@ -733,25 +799,46 @@ public final class YhwavAudioModule: Module {
 			  let url = URL(string: track.url) else { return }
 
 		let forceGapless = track.crossfadeDisabled == true
+		let directURL = fallbackDirectURL(for: track)
 
-		Task {
-			do {
-				try await engine.scheduleNext(
-					url: url,
-					trackId: nextId,
-					expectedDurationSeconds: self.expectedDurationSeconds(for: track),
-					fallbackURL: self.fallbackDirectURL(for: track),
-					forceGapless: forceGapless
-				)
-			} catch {
-				print("YhwavAudio: failed to schedule next: \(error)")
+		// Crossfade/gapless preloads the next track onto the IDLE deck as a complete AVAudioFile. The idle
+		// deck is free even while the current track streams, so we can crossfade from a streamed track into
+		// a cached one. The next track must be a local file (downloaded) or already in the native cache; if
+		// it isn't yet, pull the reliable DIRECT original into cache and let a later tick do the preload.
+		let isLocal = url.isFileURL
+		let isCached = fileCache?.hasCached(trackId: nextId) ?? false
+
+		if isLocal || isCached {
+			// This runs every progress tick until prepared, so avoid launching a second load while a
+			// previous one for the same track is still in flight (which could double-schedule).
+			if preparingNextTrackId == nextId { return }
+			preparingNextTrackId = nextId
+			// For a cached remote track, pass the direct URL so loadAudioFile resolves the cached file
+			// (keyed by trackId) instead of re-fetching the flaky transcode.
+			let preloadURL = isLocal ? url : (directURL ?? url)
+			Task {
+				defer { DispatchQueue.main.async { if self.preparingNextTrackId == nextId { self.preparingNextTrackId = nil } } }
+				do {
+					try await engine.scheduleNext(
+						url: preloadURL,
+						trackId: nextId,
+						expectedDurationSeconds: self.expectedDurationSeconds(for: track),
+						fallbackURL: directURL,
+						forceGapless: forceGapless
+					)
+				} catch {
+					print("YhwavAudio: failed to schedule next: \(error)")
+				}
 			}
+		} else {
+			fileCache?.predownload(url: directURL ?? url, trackId: nextId)
 		}
 
 		predownloadAhead(fromIndex: nextIdx + 1)
 	}
 
 	private func predownloadNext() {
+		guard !usingPodcastBackend else { return }
 		guard let engine = enginePlayer, engine.currentTrackId != nil else { return }
 		let currentIdx = currentActiveTrackIndex()
 		guard currentIdx >= 0 else { return }
@@ -768,8 +855,10 @@ public final class YhwavAudioModule: Module {
 			let idx = startIdx + i
 			guard idx < trackOrder.count else { return }
 			let id = trackOrder[idx]
-			guard let track = trackMetadata[id],
-				  let url = URL(string: track.url) else { continue }
+			guard let track = trackMetadata[id] else { continue }
+			// Prefer the direct original (static Content-Length, range support) over the transcode for
+			// cached copies that gapless/crossfade will replay off disk.
+			guard let url = fallbackDirectURL(for: track) ?? URL(string: track.url) else { continue }
 			fileCache?.predownload(url: url, trackId: id)
 		}
 	}
@@ -780,10 +869,44 @@ public final class YhwavAudioModule: Module {
 		scheduleNextTrack(afterIndex: currentIdx)
 	}
 
+	/// Called every progress tick: the next track is preloaded (crossfade) / scheduled (gapless) as a
+	/// complete local file, but that file may only finish downloading partway through the current track.
+	/// scheduleNextTrack only runs once at track-start, so without this the deck is never prepared when
+	/// the next file lands late — causing a hard cut/gap. Re-attempt until the correct next is prepared.
+	private func ensureNextTrackPrepared() {
+		guard !usingPodcastBackend, let engine = enginePlayer else { return }
+		let currentIdx = currentActiveTrackIndex()
+		guard currentIdx >= 0 else { return }
+		let nextIdx = currentIdx + 1
+		guard nextIdx < trackOrder.count else { return }
+		if engine.preparedNextTrackId == trackOrder[nextIdx] { return }
+		scheduleNextTrack(afterIndex: currentIdx)
+	}
+
 	// MARK: - Track index
 
+	/// Track id from whichever backend (engine or podcast) is currently active.
+	private var activeCurrentTrackId: String? {
+		usingPodcastBackend ? podcastPlayer?.currentTrackId : enginePlayer?.currentTrackId
+	}
+
+	/// Play/position/duration from whichever backend is currently active.
+	private func activePlaybackTiming() -> (isPlaying: Bool, position: Double, duration: Double, hasTrack: Bool) {
+		if usingPodcastBackend {
+			guard let pod = podcastPlayer, pod.currentTrackId != nil else { return (false, 0, 0, false) }
+			return (pod.isPlaying, pod.currentPosition, pod.currentDuration, true)
+		}
+		guard let engine = enginePlayer, engine.currentTrackId != nil else { return (false, 0, 0, false) }
+		return (engine.isPlaying, engine.currentPosition, engine.currentDuration, true)
+	}
+
+	/// Playback rate of the active backend (for Now Playing).
+	fileprivate func currentPlaybackRate() -> Double {
+		usingPodcastBackend ? Double(podcastPlayer?.rate ?? 1.0) : Double(enginePlayer?.rate ?? 1.0)
+	}
+
 	fileprivate func currentActiveTrackIndex() -> Int {
-		guard let trackId = enginePlayer?.currentTrackId,
+		guard let trackId = activeCurrentTrackId,
 			  let idx = trackOrder.firstIndex(of: trackId) else { return -1 }
 		return idx
 	}
@@ -828,7 +951,10 @@ public final class YhwavAudioModule: Module {
 	}
 
 	private func emitProgressUpdate() {
-		self.enginePlayer?.tickCrossfadeIfNeeded()
+		if !usingPodcastBackend {
+			self.ensureNextTrackPrepared()
+			self.enginePlayer?.tickCrossfadeIfNeeded()
+		}
 		let (state, position, duration) = currentPlaybackState()
 		if state != lastEmittedState {
 			lastEmittedState = state
@@ -853,14 +979,12 @@ public final class YhwavAudioModule: Module {
 	// MARK: - State
 
 	private func currentPlaybackState() -> (state: String, position: Double, duration: Double) {
-		guard let engine = enginePlayer else {
+		let timing = activePlaybackTiming()
+		guard timing.hasTrack else {
 			return ("stopped", 0, 0)
 		}
-		guard engine.currentTrackId != nil else {
-			return ("stopped", 0, 0)
-		}
-		let pos = engine.currentPosition
-		var dur = engine.currentDuration
+		let pos = timing.position
+		var dur = timing.duration
 		if !dur.isFinite || dur <= 0 {
 			let idx = currentActiveTrackIndex()
 			if idx >= 0, idx < trackOrder.count,
@@ -871,18 +995,18 @@ public final class YhwavAudioModule: Module {
 		let validPos = pos.isFinite && pos >= 0 ? pos : 0
 		let validDur = dur.isFinite && dur >= 0 ? dur : 0
 
-		if engine.isPlaying {
-			return ("playing", validPos, validDur)
-		} else {
-			return ("paused", validPos, validDur)
-		}
+		return (timing.isPlaying ? "playing" : "paused", validPos, validDur)
 	}
 
 	// MARK: - Play / pause / seek (bridge + remote control)
 
-	/// Same behavior as the JS `play` bridge: resume engine, run progress timer + Now Playing on the main thread.
+	/// Same behavior as the JS `play` bridge: resume the active backend, run progress timer + Now Playing on the main thread.
 	fileprivate func performPlayAndSync() {
-		enginePlayer?.resume()
+		if usingPodcastBackend {
+			DispatchQueue.main.async { self.podcastPlayer?.resume() }
+		} else {
+			enginePlayer?.resume()
+		}
 		DispatchQueue.main.async {
 			self.startProgressTimerIfNeeded()
 			self.emitProgressUpdate()
@@ -892,7 +1016,11 @@ public final class YhwavAudioModule: Module {
 
 	/// Same behavior as the JS `pause` bridge: stop audio immediately, then timer + Now Playing on main.
 	fileprivate func performPauseAndSync() {
-		enginePlayer?.pause()
+		if usingPodcastBackend {
+			DispatchQueue.main.async { self.podcastPlayer?.pause() }
+		} else {
+			enginePlayer?.pause()
+		}
 		DispatchQueue.main.async {
 			self.stopProgressTimer()
 			self.emitProgressUpdate()
@@ -901,7 +1029,11 @@ public final class YhwavAudioModule: Module {
 	}
 
 	fileprivate func performSeekAndSync(_ position: Double) {
-		enginePlayer?.seek(to: position)
+		if usingPodcastBackend {
+			DispatchQueue.main.async { self.podcastPlayer?.seek(to: position) }
+		} else {
+			enginePlayer?.seek(to: position)
+		}
 		DispatchQueue.main.async {
 			self.emitProgressUpdate()
 			self.syncNowPlaying()
@@ -911,6 +1043,44 @@ public final class YhwavAudioModule: Module {
 	deinit {
 		stopProgressTimer()
 		enginePlayer?.teardown()
+		podcastPlayer?.stop()
+	}
+}
+
+// MARK: - PodcastPlayerDelegate
+
+extension YhwavAudioModule: PodcastPlayerDelegate {
+	func podcastPlayer(_ player: PodcastPlayer, didFinishTrack trackId: String) {
+		lastTrackEndTimestamp = Date().timeIntervalSince1970 * 1000
+
+		guard let finishedIdx = trackOrder.firstIndex(of: trackId) else {
+			stopProgressTimer()
+			sendEvent("PlaybackQueueEnded", [:])
+			return
+		}
+
+		// Explicit single-track repeat: replay the same episode from the start.
+		if repeatMode == 1 {
+			print("YhwavAudio: podcast didFinish \(trackId) → repeat track")
+			guard let track = trackMetadata[trackId], let url = URL(string: track.url) else { return }
+			player.play(url: url, trackId: trackId, startAt: 0)
+			emitActiveTrackChanged(index: finishedIdx)
+			return
+		}
+
+		// Podcast queues are single-episode; a following track is uncommon. Either way, ending the
+		// episode surfaces as queue-ended so JS marks progress complete and scrobbles.
+		print("YhwavAudio: podcast didFinish \(trackId) → queue ended")
+		stopProgressTimer()
+		sendEvent("PlaybackQueueEnded", [:])
+	}
+
+	func podcastPlayer(_ player: PodcastPlayer, didEncounterError error: String, trackId: String) {
+		let now = Date().timeIntervalSince1970 * 1000
+		guard now - lastPlaybackErrorEmitTime > 500 else { return }
+		lastPlaybackErrorEmitTime = now
+		print("YhwavAudio: podcast didEncounterError trackId=\(trackId): \(error)")
+		sendEvent("PlaybackError", ["error": error, "trackId": trackId])
 	}
 }
 
@@ -1126,7 +1296,7 @@ private final class NowPlayingManager {
 		if let dur = duration, dur > 0 {
 			info[MPMediaItemPropertyPlaybackDuration] = dur
 		}
-		info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? Double(module?.enginePlayer?.rate ?? 1.0) : 0.0
+		info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? (module?.currentPlaybackRate() ?? 1.0) : 0.0
 		let current = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
 		MPNowPlayingInfoCenter.default().nowPlayingInfo = current.merging(info) { _, new in new }
 	}

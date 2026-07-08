@@ -77,6 +77,9 @@ export type CrossfadeConfigNative = {
 	maxDuration: number;
 	fadeInOnManualSkip: boolean;
 	manualSkipFadeDuration: number;
+	/** 0 equal-power, 1 linear, 2 logarithmic, 3 S-curve. */
+	curve: 0 | 1 | 2 | 3;
+	lowpassTail: boolean;
 };
 
 const TrackPlayer = {
@@ -121,9 +124,9 @@ const TrackPlayer = {
 		if (p?.move) await p.move(fromIndex, toIndex);
 	},
 
-	async skip(index: number) {
+	async skip(index: number, options?: { startPaused?: boolean; startAtSeconds?: number }) {
 		const p = getPlayer();
-		if (p?.skip) await p.skip(index);
+		if (p?.skip) await p.skip(index, options?.startPaused ?? false, options?.startAtSeconds ?? 0);
 	},
 
 	async play() {
@@ -189,6 +192,11 @@ const TrackPlayer = {
 	async setNextCrossfadeDuration(seconds: number) {
 		const p = getPlayer();
 		if (p?.setNextCrossfadeDuration) await p.setNextCrossfadeDuration(seconds);
+	},
+
+	async setNextCrossfadeTrim(trim: number) {
+		const p = getPlayer();
+		if (p?.setNextCrossfadeTrim) await p.setNextCrossfadeTrim(trim);
 	},
 
 	async getPlaybackState() {

@@ -115,11 +115,11 @@ class PerformanceMonitor {
 		this.metrics.push(metric);
 
 		// Log slow operations
-		if (duration > 100) {
-			console.warn(`⚠️ Slow operation: ${name} took ${duration.toFixed(2)}ms`, metadata || '');
-		} else if (duration > 50) {
-			console.log(`⏱️ ${name}: ${duration.toFixed(2)}ms`, metadata || '');
-		}
+		// if (duration > 100) {
+		// 	console.warn(`⚠️ Slow operation: ${name} took ${duration.toFixed(2)}ms`, metadata || '');
+		// } else if (duration > 50) {
+		// 	console.log(`⏱️ ${name}: ${duration.toFixed(2)}ms`, metadata || '');
+		// }
 
 		// Keep only last 1000 metrics to prevent memory issues
 		if (this.metrics.length > 1000) {
@@ -301,7 +301,7 @@ class PerformanceMonitor {
 	async copyToClipboard(): Promise<void> {
 		if (typeof navigator !== 'undefined' && navigator.clipboard) {
 			await navigator.clipboard.writeText(this.exportMetrics());
-			console.log('✅ Metrics copied to clipboard!');
+			// console.log('✅ Metrics copied to clipboard!');
 		} else {
 			console.log('📋 Metrics JSON:\n', this.exportMetrics());
 		}

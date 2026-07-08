@@ -13,6 +13,9 @@ export interface Track {
 	crossfadeDisabled?: boolean;
 }
 
+/** 0 equal-power, 1 linear, 2 logarithmic, 3 S-curve. */
+export type CrossfadeCurve = 0 | 1 | 2 | 3;
+
 export interface CrossfadeConfig {
 	enabled: boolean;
 	defaultDuration: number;
@@ -20,6 +23,8 @@ export interface CrossfadeConfig {
 	maxDuration: number;
 	fadeInOnManualSkip: boolean;
 	manualSkipFadeDuration: number;
+	curve: CrossfadeCurve;
+	lowpassTail: boolean;
 }
 
 export interface PlaybackState {
@@ -37,7 +42,7 @@ type YhwavAudioModuleType = {
 	remove: (indices: number[]) => Promise<void>;
 	removeUpcomingTracks: () => Promise<void>;
 	move: (fromIndex: number, toIndex: number) => Promise<void>;
-	skip: (index: number) => Promise<void>;
+	skip: (index: number, startPaused?: boolean, startAtSeconds?: number) => Promise<void>;
 	play: () => Promise<void>;
 	pause: () => Promise<void>;
 	seekTo: (position: number) => Promise<void>;
@@ -51,6 +56,7 @@ type YhwavAudioModuleType = {
 	setMonoAudioEnabled: (enabled: boolean) => Promise<void>;
 	setCrossfadeConfig: (config: CrossfadeConfig) => Promise<void>;
 	setNextCrossfadeDuration: (seconds: number) => Promise<void>;
+	setNextCrossfadeTrim: (trim: number) => Promise<void>;
 	getPlaybackState: () => PlaybackState;
 	getActiveTrackIndex: () => number;
 	getQueue: () => Track[];
