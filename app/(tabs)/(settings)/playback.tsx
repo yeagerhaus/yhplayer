@@ -157,7 +157,6 @@ export default function PlaybackScreen() {
 		streamingBitrateWifi,
 		streamingBitrateCellular,
 		streamingTranscodeCapKbps,
-		downloadBitrateKbps,
 		setEqualizerEnabled,
 		setBandGain,
 		setPreset,
@@ -168,7 +167,6 @@ export default function PlaybackScreen() {
 		setStreamingBitrateWifi,
 		setStreamingBitrateCellular,
 		setStreamingTranscodeCapKbps,
-		setDownloadBitrateKbps,
 		crossfadeEnabled,
 		crossfadeDurationSec,
 		crossfadeAdaptiveEnabled,
@@ -212,7 +210,7 @@ export default function PlaybackScreen() {
 					</Text>
 					<Text style={[DefaultStyles.sectionDescription, { marginBottom: 8 }]}>
 						Remote Plex music uses a max audio bitrate (kbps). We pick Wi‑Fi vs cellular from your connection; Original sends
-						the file unchanged. Downloads apply the same limits to new saves—re-download to replace an existing file.
+						the file unchanged. Downloads always save the original file.
 					</Text>
 
 					<BitrateChoiceRow
@@ -232,15 +230,6 @@ export default function PlaybackScreen() {
 						description='Optional ceiling when Plex transcodes (lower of this and your connection limit). Original leaves only Wi‑Fi/cellular in effect.'
 						value={streamingTranscodeCapKbps}
 						onSelect={setStreamingTranscodeCapKbps}
-					/>
-
-					<View style={[styles.divider, { backgroundColor: colors.surfaceTertiary, marginVertical: 8 }]} />
-
-					<BitrateChoiceRow
-						label='Download quality'
-						description='Bitrate for music saved offline. Does not affect podcasts.'
-						value={downloadBitrateKbps}
-						onSelect={setDownloadBitrateKbps}
 					/>
 				</Div>
 

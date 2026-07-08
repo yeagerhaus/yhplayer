@@ -3,6 +3,7 @@ import { storage } from '@/lib/storage';
 import type { Song } from '@/types';
 import { fetchUltraBlurColors } from '@/utils/plex';
 import { useAudioStore } from './useAudioStore';
+import { getIsOfflineMode } from './useOfflineModeStore';
 
 const STORAGE_KEY = 'ULTRABLUR_CACHE';
 const MAX_ENTRIES = 500;
@@ -97,19 +98,25 @@ export const useUltraBlurColors = create<UltraBlurState>((set) => ({
 			}
 		}
 
-		// 3. Fetch from API
+		// 3. Fetch from API. Skip when offline — Plex isn't reachable and initialize() would throw,
+		// surfacing as an uncaught rejection on every track change in offline mode.
 		const thumbUrl = song.artworkUrl || song.artwork;
-		if (!thumbUrl) {
+		if (!thumbUrl || getIsOfflineMode()) {
 			set({ colors: DEFAULT_COLORS, hasColors: false });
 			return;
 		}
 
-		const colors = await fetchUltraBlurColors(thumbUrl);
-		if (colors && colors.length > 0) {
-			memoryCache.set(songId, colors);
-			persistCache();
-			set({ colors: arrayToDirectional(colors), hasColors: true });
-		} else {
+		try {
+			const colors = await fetchUltraBlurColors(thumbUrl);
+			if (colors && colors.length > 0) {
+				memoryCache.set(songId, colors);
+				persistCache();
+				set({ colors: arrayToDirectional(colors), hasColors: true });
+			} else {
+				set({ colors: DEFAULT_COLORS, hasColors: false });
+			}
+		} catch {
+			// Network/offline/transient failure — fall back to defaults rather than rejecting.
 			set({ colors: DEFAULT_COLORS, hasColors: false });
 		}
 	},
@@ -121,7 +128,10 @@ useAudioStore.subscribe((state) => {
 	const song = state.currentSong;
 	if (!song || song.id === lastSongId) return;
 	lastSongId = song.id;
-	useUltraBlurColors.getState().fetchColors(song);
+	useUltraBlurColors
+		.getState()
+		.fetchColors(song)
+		.catch(() => {});
 });
 
 // Kick off cache load eagerly

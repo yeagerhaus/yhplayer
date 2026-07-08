@@ -47,6 +47,23 @@ function persistDownloads(downloads: Record<string, PodcastDownload>) {
 	storage.set(STORAGE_KEY, JSON.stringify(list));
 }
 
+/** Bounded parallelism so batch-downloading a feed doesn't open dozens of simultaneous connections. */
+const MAX_CONCURRENT_PODCAST_DOWNLOADS = 3;
+let activePodcastDownloads = 0;
+const podcastDownloadQueue: Array<() => Promise<void>> = [];
+
+function runPodcastDownloadQueue() {
+	while (activePodcastDownloads < MAX_CONCURRENT_PODCAST_DOWNLOADS && podcastDownloadQueue.length > 0) {
+		const job = podcastDownloadQueue.shift();
+		if (!job) break;
+		activePodcastDownloads++;
+		void job().finally(() => {
+			activePodcastDownloads--;
+			runPodcastDownloadQueue();
+		});
+	}
+}
+
 export const usePodcastDownloadsStore = create<PodcastDownloadsState>((set, get) => ({
 	downloads: {},
 	downloading: new Set(),
@@ -71,54 +88,57 @@ export const usePodcastDownloadsStore = create<PodcastDownloadsState>((set, get)
 		}
 	},
 
-	downloadEpisode: async (episode: PodcastEpisode, feed: PodcastFeed) => {
+	downloadEpisode: (episode: PodcastEpisode, feed: PodcastFeed) => {
 		const { downloads, downloading } = get();
-		if (downloads[episode.id] || downloading.has(episode.id)) return;
+		if (downloads[episode.id] || downloading.has(episode.id)) return Promise.resolve();
 
+		// Mark as downloading immediately (before the job runs) so rapid taps dedupe and the UI updates.
 		set((s) => ({
 			downloading: new Set(s.downloading).add(episode.id),
 		}));
 
-		const dir = `${FileSystem.documentDirectory ?? ''}podcasts`;
-		const ext = extensionFromUrl(episode.enclosureUrl);
-		const filename = `${safeSegment(episode.id)}${ext}`;
-		const localPath = `${dir}/${filename}`;
+		return new Promise<void>((resolve, reject) => {
+			podcastDownloadQueue.push(async () => {
+				const dir = `${FileSystem.documentDirectory ?? ''}podcasts`;
+				const ext = extensionFromUrl(episode.enclosureUrl);
+				const filename = `${safeSegment(episode.id)}${ext}`;
+				const localPath = `${dir}/${filename}`;
 
-		try {
-			await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
-			const { uri } = await FileSystem.downloadAsync(episode.enclosureUrl, localPath);
+				try {
+					await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
+					const { uri } = await FileSystem.downloadAsync(episode.enclosureUrl, localPath);
 
-			const entry: PodcastDownload = {
-				episodeId: episode.id,
-				id: episode.id,
-				feedId: episode.feedId,
-				localUri: uri,
-				title: episode.title,
-				showTitle: feed.title ?? feed.url ?? 'Show',
-				pubDate: episode.pubDate,
-				durationSeconds: episode.durationSeconds,
-				imageUrl: episode.imageUrl ?? feed.imageUrl,
-				downloadedAt: Date.now(),
-			};
+					const entry: PodcastDownload = {
+						episodeId: episode.id,
+						id: episode.id,
+						feedId: episode.feedId,
+						localUri: uri,
+						title: episode.title,
+						showTitle: feed.title ?? feed.url ?? 'Show',
+						pubDate: episode.pubDate,
+						durationSeconds: episode.durationSeconds,
+						imageUrl: episode.imageUrl ?? feed.imageUrl,
+						downloadedAt: Date.now(),
+					};
 
-			const next = { ...get().downloads, [episode.id]: entry };
-			set({
-				downloads: next,
-				downloading: (() => {
-					const s = new Set(get().downloading);
-					s.delete(episode.id);
-					return s;
-				})(),
+					set((s) => {
+						const d = new Set(s.downloading);
+						d.delete(episode.id);
+						return { downloads: { ...s.downloads, [episode.id]: entry }, downloading: d };
+					});
+					persistDownloads(get().downloads);
+					resolve();
+				} catch {
+					set((s) => {
+						const d = new Set(s.downloading);
+						d.delete(episode.id);
+						return { downloading: d };
+					});
+					reject(new Error('Download failed'));
+				}
 			});
-			persistDownloads(next);
-		} catch {
-			set((s) => {
-				const next = new Set(s.downloading);
-				next.delete(episode.id);
-				return { downloading: next };
-			});
-			throw new Error('Download failed');
-		}
+			runPodcastDownloadQueue();
+		});
 	},
 
 	removeDownload: async (episodeId: string) => {

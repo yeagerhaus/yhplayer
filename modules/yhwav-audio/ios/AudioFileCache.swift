@@ -1,10 +1,45 @@
 import AVFoundation
 import Foundation
 
-/// Serializes HTTP downloads so we never run multiple full-file Plex pulls at once (avoids -1005 / connection drops).
-private actor AudioDownloadSerialGate {
+/// Bounds concurrent HTTP downloads so we don't open an unlimited number of Plex pulls at once
+/// (too many caused -1005 / connection drops), while still overlapping a few for throughput.
+private actor AudioDownloadGate {
+	private let maxConcurrent: Int
+	private var active = 0
+	private var waiters: [CheckedContinuation<Void, Never>] = []
+
+	init(maxConcurrent: Int) {
+		self.maxConcurrent = max(1, maxConcurrent)
+	}
+
+	private func acquire() async {
+		if active < maxConcurrent {
+			active += 1
+			return
+		}
+		await withCheckedContinuation { waiters.append($0) }
+	}
+
+	private func release() {
+		if let next = waiters.first {
+			waiters.removeFirst()
+			// Hand the slot directly to the next waiter (active count unchanged).
+			next.resume()
+		} else {
+			active -= 1
+		}
+	}
+
 	func run<T: Sendable>(_ body: @Sendable () async throws -> T) async throws -> T {
-		try await body()
+		await acquire()
+		do {
+			let result = try await body()
+			release()
+			return result
+		} catch {
+			release()
+			throw error
+		}
 	}
 }
 
@@ -17,7 +52,7 @@ final class AudioFileCache {
 	private var cachedFiles: [String: URL] = [:]
 	private var activeDownloads: [String: Task<URL, Error>] = [:]
 	private let queue = DispatchQueue(label: "com.yhwav.audio-file-cache")
-	private let downloadSerial = AudioDownloadSerialGate()
+	private let downloadGate = AudioDownloadGate(maxConcurrent: 3)
 
 	private let maxRetries = 2
 	private let retryDelay: TimeInterval = 0.5
@@ -198,7 +233,7 @@ final class AudioFileCache {
 
 	private func performDownload(url: URL, trackId: String) async throws -> URL {
 		let dir = cacheDir
-		let dest: URL = try await downloadSerial.run {
+		let dest: URL = try await downloadGate.run {
 			let start = Date()
 			let isTranscode = url.path.contains("/transcode/")
 			print("YhwavAudio: cache download start trackId=\(trackId) transcode=\(isTranscode)")

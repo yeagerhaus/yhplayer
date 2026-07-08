@@ -23,8 +23,13 @@ export function plexTokenFromUrl(directUrl: string): string | null {
 /**
  * Build a Plex universal transcode URL so the server sends a smaller
  * MP3 instead of the original lossless file.
+ *
+ * `sessionId` must be unique per concurrent request. The universal transcoder keys sessions by
+ * client, so parallel `start.mp3` requests that share a session cause Plex to kill each other's
+ * transcode mid-stream (truncated files / NSURLError -1017). Pass a distinct id per parallel
+ * download to keep them independent.
  */
-export function buildPlexTranscodeUrl(ratingKey: string, maxBitrate: number, referenceUrl: string): string | null {
+export function buildPlexTranscodeUrl(ratingKey: string, maxBitrate: number, referenceUrl: string, sessionId?: string): string | null {
 	const { plexClient } = require('@/utils/plex-client');
 	const { plexAuthService } = require('@/utils/plex-auth');
 	const { encodePlexIdentityQueryString, buildPlexIdentityHeaders } = require('@/utils/plex-identity');
@@ -37,6 +42,10 @@ export function buildPlexTranscodeUrl(ratingKey: string, maxBitrate: number, ref
 	const clientId = plexAuthService.getClientIdentifier();
 	const identityQs = encodePlexIdentityQueryString(buildPlexIdentityHeaders(clientId));
 
+	const sessionQs = sessionId
+		? `&session=${encodeURIComponent(sessionId)}&X-Plex-Session-Identifier=${encodeURIComponent(sessionId)}`
+		: '';
+
 	return (
 		`${baseURL}/music/:/transcode/universal/start.mp3` +
 		`?path=${encodeURIComponent(`/library/metadata/${ratingKey}`)}` +
@@ -44,6 +53,7 @@ export function buildPlexTranscodeUrl(ratingKey: string, maxBitrate: number, ref
 		`&protocol=http` +
 		`&directPlay=0&directStream=1` +
 		`&maxAudioBitrate=${maxBitrate}` +
+		sessionQs +
 		`&X-Plex-Token=${encodeURIComponent(token)}` +
 		`&${identityQs}`
 	);
@@ -57,6 +67,7 @@ export function buildPlexStreamUrl(
 	song: Pick<Song, 'id' | 'source' | 'uri'>,
 	referenceUrl: string,
 	maxBitrate: number | null,
+	sessionId?: string,
 ): { url: string; directUrl?: string } {
 	if (song.source === 'podcast' || !referenceUrl.includes('X-Plex-Token')) {
 		return { url: referenceUrl };
@@ -65,7 +76,7 @@ export function buildPlexStreamUrl(
 		return { url: referenceUrl };
 	}
 
-	const transcodeUrl = buildPlexTranscodeUrl(song.id, maxBitrate, referenceUrl);
+	const transcodeUrl = buildPlexTranscodeUrl(song.id, maxBitrate, referenceUrl, sessionId);
 	if (transcodeUrl) {
 		const raw = typeof song.uri === 'string' ? song.uri.trim() : '';
 		if (raw.length > 0 && raw.includes('X-Plex-Token')) {
