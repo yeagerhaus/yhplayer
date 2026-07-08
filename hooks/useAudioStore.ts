@@ -3,7 +3,7 @@ import { InteractionManager } from 'react-native';
 import ImageColors from 'react-native-image-colors';
 import { create } from 'zustand';
 import { getStreamingPlaybackBitrateKbps } from '@/hooks/usePlaybackSettingsStore';
-import { computeCrossfadeDuration } from '@/lib/crossfadeAlgorithm';
+import { computeCrossfadeDuration, computeIncomingLoudnessTrim } from '@/lib/crossfadeAlgorithm';
 import { getCachedNetworkPlaybackRoute } from '@/lib/networkPlaybackRoute';
 import TrackPlayer, {
 	Capability,
@@ -1107,17 +1107,19 @@ export function useTrackPlayerSync() {
 							minDuration: 1,
 							maxDuration: 12,
 						};
+						const outLoudness = effectiveLoudnessData(state.currentSong);
+						const inLoudness = effectiveLoudnessData(nextSong);
 						const sec = pbs.crossfadeAdaptiveEnabled
-							? computeCrossfadeDuration(
-									effectiveLoudnessData(state.currentSong),
-									effectiveLoudnessData(nextSong),
-									baseConfig,
-								)
+							? computeCrossfadeDuration(outLoudness, inLoudness, baseConfig)
 							: pbs.crossfadeDurationSec;
-						const sig = `${state.currentSong.id}|${nextSong.id}|${sec.toFixed(2)}`;
+						// Gain-match the incoming track during the overlap (only when Adaptive is on, since it
+						// relies on the same loudness metadata). Reset to 1 otherwise so a stale trim can't linger.
+						const trim = pbs.crossfadeAdaptiveEnabled ? computeIncomingLoudnessTrim(outLoudness, inLoudness) : 1;
+						const sig = `${state.currentSong.id}|${nextSong.id}|${sec.toFixed(2)}|${trim.toFixed(3)}`;
 						if (sig !== lastCrossfadeSignature) {
 							lastCrossfadeSignature = sig;
 							TrackPlayer.setNextCrossfadeDuration(sec).catch(() => {});
+							TrackPlayer.setNextCrossfadeTrim(trim).catch(() => {});
 						}
 					}
 				}

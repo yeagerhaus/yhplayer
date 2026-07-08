@@ -37,6 +37,10 @@ struct CrossfadeConfigRecord: Record {
 	@Field var maxDuration: Double = 8.0
 	@Field var fadeInOnManualSkip: Bool = true
 	@Field var manualSkipFadeDuration: Double = 0.5
+	/// Crossfade volume curve: 0 equal-power, 1 linear, 2 logarithmic, 3 S-curve.
+	@Field var curve: Int = 0
+	/// Sweep a lowpass on the outgoing deck during the crossfade tail.
+	@Field var lowpassTail: Bool = true
 }
 
 struct PlaybackStateRecord: Record {
@@ -381,6 +385,10 @@ public final class YhwavAudioModule: Module {
 	private var lastEmittedState: String = "stopped"
 	private var suppressTrackChangeEvents = false
 	private var crossfadeUserEnabled = false
+	private var fadeInOnManualSkip = true
+	private var manualSkipFadeSeconds: Double = 0.5
+	/// Next track id whose idle-deck preload / gapless schedule is currently in flight (main-thread only).
+	private var preparingNextTrackId: String?
 
 	private lazy var nowPlayingManager = NowPlayingManager(module: self)
 
@@ -560,6 +568,12 @@ public final class YhwavAudioModule: Module {
 			}
 			self.fileCache?.cancelDownloads(exceptTrackIds: keepPrefetch)
 
+			// A skip is user-initiated. Fade the incoming track in only when a track was ALREADY playing
+			// (a real mid-playback skip) — a cold start or paused restore shouldn't fade in, since there's
+			// no outgoing audio to smooth over.
+			let wasPlaying = engine.isPlaying
+			let fadeInSeconds = (self.fadeInOnManualSkip && !paused && wasPlaying) ? self.manualSkipFadeSeconds : 0
+
 			Task {
 				do {
 					try await engine.play(
@@ -568,7 +582,8 @@ public final class YhwavAudioModule: Module {
 						expectedDurationSeconds: self.expectedDurationSeconds(for: track),
 						fallbackURL: self.fallbackDirectURL(for: track),
 						startPaused: paused,
-						startAtSeconds: startAt
+						startAtSeconds: startAt,
+						fadeInSeconds: fadeInSeconds
 					)
 					await MainActor.run {
 						self.emitActiveTrackChanged(index: index)
@@ -655,11 +670,21 @@ public final class YhwavAudioModule: Module {
 			if config.defaultDuration > 0 {
 				self.enginePlayer?.nextCrossfadeDuration = config.defaultDuration
 			}
+			self.enginePlayer?.crossfadeCurve = AudioEnginePlayer.CrossfadeCurve(rawValue: config.curve) ?? .equalPower
+			self.enginePlayer?.crossfadeLowpassTailEnabled = config.lowpassTail
+			self.fadeInOnManualSkip = config.fadeInOnManualSkip
+			self.manualSkipFadeSeconds = max(0, min(3.0, config.manualSkipFadeDuration))
+			self.enginePlayer?.fadeInOnManualSkip = config.fadeInOnManualSkip
+			self.enginePlayer?.manualSkipFadeDuration = self.manualSkipFadeSeconds
 		}
 
 		AsyncFunction("setNextCrossfadeDuration") { (seconds: Double) in
 			let clamped = max(0.1, min(30.0, seconds))
 			self.enginePlayer?.nextCrossfadeDuration = clamped
+		}
+
+		AsyncFunction("setNextCrossfadeTrim") { (trim: Double) in
+			self.enginePlayer?.nextIncomingTrim = Float(max(0.1, min(4.0, trim)))
 		}
 
 		Function("getPlaybackState") { () -> PlaybackStateRecord in
@@ -778,29 +803,40 @@ public final class YhwavAudioModule: Module {
 		guard let track = trackMetadata[nextId],
 			  let url = URL(string: track.url) else { return }
 
-		// While the current track is being streamed, the active deck is busy with streamed buffers, so we
-		// can't preload the next track onto a deck (that's the crossfade/gapless file path). Instead we
-		// prefetch upcoming tracks into the cache so they play via the fast file path once current — and
-		// once a streamed track hands off to a cached one, gapless/crossfade resume normally.
-		if engine.isCurrentStreaming {
-			predownloadAhead(fromIndex: nextIdx)
-			return
-		}
-
 		let forceGapless = track.crossfadeDisabled == true
+		let directURL = fallbackDirectURL(for: track)
 
-		Task {
-			do {
-				try await engine.scheduleNext(
-					url: url,
-					trackId: nextId,
-					expectedDurationSeconds: self.expectedDurationSeconds(for: track),
-					fallbackURL: self.fallbackDirectURL(for: track),
-					forceGapless: forceGapless
-				)
-			} catch {
-				print("YhwavAudio: failed to schedule next: \(error)")
+		// Crossfade/gapless preloads the next track onto the IDLE deck as a complete AVAudioFile. The idle
+		// deck is free even while the current track streams, so we can crossfade from a streamed track into
+		// a cached one. The next track must be a local file (downloaded) or already in the native cache; if
+		// it isn't yet, pull the reliable DIRECT original into cache and let a later tick do the preload.
+		let isLocal = url.isFileURL
+		let isCached = fileCache?.hasCached(trackId: nextId) ?? false
+
+		if isLocal || isCached {
+			// This runs every progress tick until prepared, so avoid launching a second load while a
+			// previous one for the same track is still in flight (which could double-schedule).
+			if preparingNextTrackId == nextId { return }
+			preparingNextTrackId = nextId
+			// For a cached remote track, pass the direct URL so loadAudioFile resolves the cached file
+			// (keyed by trackId) instead of re-fetching the flaky transcode.
+			let preloadURL = isLocal ? url : (directURL ?? url)
+			Task {
+				defer { DispatchQueue.main.async { if self.preparingNextTrackId == nextId { self.preparingNextTrackId = nil } } }
+				do {
+					try await engine.scheduleNext(
+						url: preloadURL,
+						trackId: nextId,
+						expectedDurationSeconds: self.expectedDurationSeconds(for: track),
+						fallbackURL: directURL,
+						forceGapless: forceGapless
+					)
+				} catch {
+					print("YhwavAudio: failed to schedule next: \(error)")
+				}
 			}
+		} else {
+			fileCache?.predownload(url: directURL ?? url, trackId: nextId)
 		}
 
 		predownloadAhead(fromIndex: nextIdx + 1)
@@ -824,8 +860,10 @@ public final class YhwavAudioModule: Module {
 			let idx = startIdx + i
 			guard idx < trackOrder.count else { return }
 			let id = trackOrder[idx]
-			guard let track = trackMetadata[id],
-				  let url = URL(string: track.url) else { continue }
+			guard let track = trackMetadata[id] else { continue }
+			// Prefer the direct original (static Content-Length, range support) over the transcode for
+			// cached copies that gapless/crossfade will replay off disk.
+			guard let url = fallbackDirectURL(for: track) ?? URL(string: track.url) else { continue }
 			fileCache?.predownload(url: url, trackId: id)
 		}
 	}
@@ -833,6 +871,20 @@ public final class YhwavAudioModule: Module {
 	private func rescheduleNextIfNeeded() {
 		let currentIdx = currentActiveTrackIndex()
 		guard currentIdx >= 0 else { return }
+		scheduleNextTrack(afterIndex: currentIdx)
+	}
+
+	/// Called every progress tick: the next track is preloaded (crossfade) / scheduled (gapless) as a
+	/// complete local file, but that file may only finish downloading partway through the current track.
+	/// scheduleNextTrack only runs once at track-start, so without this the deck is never prepared when
+	/// the next file lands late — causing a hard cut/gap. Re-attempt until the correct next is prepared.
+	private func ensureNextTrackPrepared() {
+		guard !usingPodcastBackend, let engine = enginePlayer else { return }
+		let currentIdx = currentActiveTrackIndex()
+		guard currentIdx >= 0 else { return }
+		let nextIdx = currentIdx + 1
+		guard nextIdx < trackOrder.count else { return }
+		if engine.preparedNextTrackId == trackOrder[nextIdx] { return }
 		scheduleNextTrack(afterIndex: currentIdx)
 	}
 
@@ -905,6 +957,7 @@ public final class YhwavAudioModule: Module {
 
 	private func emitProgressUpdate() {
 		if !usingPodcastBackend {
+			self.ensureNextTrackPrepared()
 			self.enginePlayer?.tickCrossfadeIfNeeded()
 		}
 		let (state, position, duration) = currentPlaybackState()

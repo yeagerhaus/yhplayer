@@ -30,3 +30,16 @@ export function computeCrossfadeDuration(
 	const duration = lraDuration * outPeakFactor * gapFactor;
 	return Math.max(config.minDuration, Math.min(config.maxDuration, duration));
 }
+
+/**
+ * Linear gain to apply to the incoming track at the START of the overlap so it enters matched to the
+ * outgoing track's integrated loudness (the native ramp eases this back to 1.0 by the end). Returns 1
+ * (no adjustment) when either track lacks loudness metadata.
+ */
+export function computeIncomingLoudnessTrim(outgoing: LoudnessData | undefined, incoming: LoudnessData | undefined): number {
+	if (!outgoing || !incoming) return 1;
+	// loudness is integrated LUFS (negative). If the incoming track is louder, trim below 1 to match.
+	const diffDb = outgoing.loudness - incoming.loudness;
+	const linear = 10 ** (diffDb / 20);
+	return Math.max(0.25, Math.min(4, linear));
+}

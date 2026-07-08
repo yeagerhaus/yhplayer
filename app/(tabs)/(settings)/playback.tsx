@@ -6,6 +6,8 @@ import { Main } from '@/components/Main';
 import { DefaultStyles } from '@/constants/styles';
 import { useColors, useThemedStyles } from '@/hooks/useColors';
 import {
+	CROSSFADE_CURVE_LABELS,
+	CROSSFADE_CURVES,
 	EQ_PRESETS,
 	formatBitrateChoiceLabel,
 	formatFrequency,
@@ -170,9 +172,11 @@ export default function PlaybackScreen() {
 		crossfadeEnabled,
 		crossfadeDurationSec,
 		crossfadeAdaptiveEnabled,
+		crossfadeCurve,
 		setCrossfadeEnabled,
 		setCrossfadeDurationSec,
 		setCrossfadeAdaptiveEnabled,
+		setCrossfadeCurve,
 	} = usePlaybackSettingsStore();
 
 	const [scrollEnabled, setScrollEnabled] = useState(true);
@@ -402,6 +406,25 @@ export default function PlaybackScreen() {
 								<Text type='body' colorVariant='muted'>
 									{crossfadeDurationSec.toFixed(1)} s
 								</Text>
+							</Div>
+
+							<View style={[styles.divider, { backgroundColor: colors.surfaceTertiary }]} />
+							<Text type='label' colorVariant='muted' style={{ marginBottom: 4 }}>
+								Fade curve
+							</Text>
+							<Text type='bodyXS' colorVariant='muted' style={{ marginBottom: 10 }}>
+								Shape of the volume blend. Equal power keeps a steady level; S-curve is smoothest; logarithmic separates
+								busy tracks.
+							</Text>
+							<Div transparent style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+								{CROSSFADE_CURVES.map((curve) => (
+									<PresetChip
+										key={curve}
+										name={CROSSFADE_CURVE_LABELS[curve]}
+										selected={crossfadeCurve === curve}
+										onPress={() => setCrossfadeCurve(curve)}
+									/>
+								))}
 							</Div>
 						</>
 					)}

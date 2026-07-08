@@ -17,6 +17,23 @@ const STORAGE_DOWNLOAD_BITRATE = 'PLAYBACK_DOWNLOAD_BITRATE';
 const STORAGE_CROSSFADE_ENABLED = 'PLAYBACK_CROSSFADE_ENABLED';
 const STORAGE_CROSSFADE_DURATION = 'PLAYBACK_CROSSFADE_DURATION';
 const STORAGE_CROSSFADE_ADAPTIVE = 'PLAYBACK_CROSSFADE_ADAPTIVE';
+const STORAGE_CROSSFADE_CURVE = 'PLAYBACK_CROSSFADE_CURVE';
+
+/** Crossfade volume-ramp shape. Order matches the native `CrossfadeCurve` enum. */
+export const CROSSFADE_CURVES = ['equalPower', 'linear', 'logarithmic', 'sCurve'] as const;
+export type CrossfadeCurve = (typeof CROSSFADE_CURVES)[number];
+
+export const CROSSFADE_CURVE_LABELS: Record<CrossfadeCurve, string> = {
+	equalPower: 'Equal power',
+	linear: 'Linear',
+	logarithmic: 'Logarithmic',
+	sCurve: 'S-curve',
+};
+
+function crossfadeCurveToNative(curve: CrossfadeCurve): 0 | 1 | 2 | 3 {
+	const idx = CROSSFADE_CURVES.indexOf(curve);
+	return (idx >= 0 ? idx : 0) as 0 | 1 | 2 | 3;
+}
 
 /** null = Original (no bitrate cap). */
 export const STREAMING_BITRATE_KBPS_OPTIONS = [null, 320, 192, 128, 96] as const;
@@ -100,6 +117,7 @@ interface PlaybackSettingsState {
 	/** Fixed overlap seconds when adaptive is off; also caps range for adaptive heuristic. */
 	crossfadeDurationSec: number;
 	crossfadeAdaptiveEnabled: boolean;
+	crossfadeCurve: CrossfadeCurve;
 
 	hydrate: () => void;
 	syncNativeCrossfade: () => void;
@@ -118,13 +136,14 @@ interface PlaybackSettingsState {
 	setCrossfadeEnabled: (enabled: boolean) => void;
 	setCrossfadeDurationSec: (seconds: number) => void;
 	setCrossfadeAdaptiveEnabled: (enabled: boolean) => void;
+	setCrossfadeCurve: (curve: CrossfadeCurve) => void;
 }
 
 function applyBandsToNative(bands: EQBand[]) {
 	TrackPlayer.setEqualizerBands(bands).catch(() => {});
 }
 
-function pushCrossfadeConfigToNative(enabled: boolean, defaultDuration: number, minDuration = 1, maxDuration = 12) {
+function pushCrossfadeConfigToNative(enabled: boolean, defaultDuration: number, curve: CrossfadeCurve, minDuration = 1, maxDuration = 12) {
 	TrackPlayer.setCrossfadeConfig({
 		enabled,
 		defaultDuration,
@@ -132,6 +151,8 @@ function pushCrossfadeConfigToNative(enabled: boolean, defaultDuration: number, 
 		maxDuration,
 		fadeInOnManualSkip: true,
 		manualSkipFadeDuration: 0.5,
+		curve: crossfadeCurveToNative(curve),
+		lowpassTail: true,
 	}).catch(() => {});
 }
 
@@ -150,10 +171,11 @@ export const usePlaybackSettingsStore = create<PlaybackSettingsState>((set, get)
 	crossfadeEnabled: false,
 	crossfadeDurationSec: 4,
 	crossfadeAdaptiveEnabled: true,
+	crossfadeCurve: 'equalPower',
 
 	syncNativeCrossfade: () => {
-		const { crossfadeEnabled, crossfadeDurationSec } = get();
-		pushCrossfadeConfigToNative(crossfadeEnabled, crossfadeDurationSec);
+		const { crossfadeEnabled, crossfadeDurationSec, crossfadeCurve } = get();
+		pushCrossfadeConfigToNative(crossfadeEnabled, crossfadeDurationSec, crossfadeCurve);
 	},
 
 	hydrate: () => {
@@ -167,6 +189,7 @@ export const usePlaybackSettingsStore = create<PlaybackSettingsState>((set, get)
 			const crossfadeEnRaw = storage.getString(STORAGE_CROSSFADE_ENABLED);
 			const crossfadeDurRaw = storage.getString(STORAGE_CROSSFADE_DURATION);
 			const crossfadeAdRaw = storage.getString(STORAGE_CROSSFADE_ADAPTIVE);
+			const crossfadeCurveRaw = storage.getString(STORAGE_CROSSFADE_CURVE);
 
 			const eqEnabled = eqEnabledRaw === '1';
 			const bands = bandsRaw ? JSON.parse(bandsRaw) : DEFAULT_BANDS;
@@ -177,6 +200,9 @@ export const usePlaybackSettingsStore = create<PlaybackSettingsState>((set, get)
 			const crossfadeEnabled = crossfadeEnRaw === '1';
 			const crossfadeDurationSec = crossfadeDurRaw ? Number.parseFloat(crossfadeDurRaw) : 4;
 			const crossfadeAdaptiveEnabled = crossfadeAdRaw !== '0';
+			const crossfadeCurve: CrossfadeCurve = CROSSFADE_CURVES.includes(crossfadeCurveRaw as CrossfadeCurve)
+				? (crossfadeCurveRaw as CrossfadeCurve)
+				: 'equalPower';
 
 			let streamingBitrateWifi: number | null;
 			let streamingBitrateCellular: number | null;
@@ -244,9 +270,10 @@ export const usePlaybackSettingsStore = create<PlaybackSettingsState>((set, get)
 				crossfadeEnabled,
 				crossfadeDurationSec: Number.isFinite(crossfadeDurationSec) ? crossfadeDurationSec : 4,
 				crossfadeAdaptiveEnabled,
+				crossfadeCurve,
 			});
 
-			pushCrossfadeConfigToNative(crossfadeEnabled, Number.isFinite(crossfadeDurationSec) ? crossfadeDurationSec : 4);
+			pushCrossfadeConfigToNative(crossfadeEnabled, Number.isFinite(crossfadeDurationSec) ? crossfadeDurationSec : 4, crossfadeCurve);
 
 			TrackPlayer.setEqualizerEnabled(eqEnabled).catch(() => {});
 			applyBandsToNative(bands);
@@ -343,18 +370,24 @@ export const usePlaybackSettingsStore = create<PlaybackSettingsState>((set, get)
 	setCrossfadeEnabled: (enabled: boolean) => {
 		set({ crossfadeEnabled: enabled });
 		storage.set(STORAGE_CROSSFADE_ENABLED, enabled ? '1' : '0');
-		pushCrossfadeConfigToNative(enabled, get().crossfadeDurationSec);
+		pushCrossfadeConfigToNative(enabled, get().crossfadeDurationSec, get().crossfadeCurve);
 	},
 
 	setCrossfadeDurationSec: (seconds: number) => {
 		const clamped = Math.max(1, Math.min(12, Math.round(seconds * 10) / 10));
 		set({ crossfadeDurationSec: clamped });
 		storage.set(STORAGE_CROSSFADE_DURATION, String(clamped));
-		pushCrossfadeConfigToNative(get().crossfadeEnabled, clamped);
+		pushCrossfadeConfigToNative(get().crossfadeEnabled, clamped, get().crossfadeCurve);
 	},
 
 	setCrossfadeAdaptiveEnabled: (enabled: boolean) => {
 		set({ crossfadeAdaptiveEnabled: enabled });
 		storage.set(STORAGE_CROSSFADE_ADAPTIVE, enabled ? '1' : '0');
+	},
+
+	setCrossfadeCurve: (curve: CrossfadeCurve) => {
+		set({ crossfadeCurve: curve });
+		storage.set(STORAGE_CROSSFADE_CURVE, curve);
+		pushCrossfadeConfigToNative(get().crossfadeEnabled, get().crossfadeDurationSec, curve);
 	},
 }));
