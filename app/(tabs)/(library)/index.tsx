@@ -92,22 +92,6 @@ export default function LibraryScreen() {
 
 	return (
 		<Main refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.brand} />}>
-			<Div flex={1} style={{ paddingHorizontal: 16, marginBottom: 16 }} transparent>
-				<Text type='bodySM' colorVariant='muted' style={{ marginBottom: 12 }}>
-					{Number(trackCount).toLocaleString()} {trackCount === 1 ? 'Song' : 'Songs'} in Library
-				</Text>
-				<View style={styles.sectionGrid}>
-					{SECTIONS.map((section) => (
-						<Pressable key={section.title} style={styles.sectionCard} onPress={() => router.push(section.route as any)}>
-							<Div useGlass style={styles.sectionCardInner}>
-								<SymbolView name={section.icon} size={28} type='hierarchical' tintColor={colors.text} />
-								<Text type='label'>{section.title}</Text>
-							</Div>
-						</Pressable>
-					))}
-				</View>
-			</Div>
-
 			{isEmpty ? (
 				<Div transparent style={styles.emptyState}>
 					<Text type='bodySM' style={styles.emptyText}>
@@ -150,6 +134,22 @@ export default function LibraryScreen() {
 					/>
 				</Div>
 			)}
+
+			<Div flex={1} style={{ paddingHorizontal: 16, marginBottom: 16 }} transparent>
+				<Text type='bodySM' colorVariant='muted' style={{ marginBottom: 12 }}>
+					{Number(trackCount).toLocaleString()} {trackCount === 1 ? 'Song' : 'Songs'} in Library
+				</Text>
+				<View style={styles.sectionGrid}>
+					{SECTIONS.map((section) => (
+						<Pressable key={section.title} style={styles.sectionCard} onPress={() => router.push(section.route as any)}>
+							<Div useGlass style={styles.sectionCardInner}>
+								<SymbolView name={section.icon} size={28} type='hierarchical' tintColor={colors.text} />
+								<Text type='label'>{section.title}</Text>
+							</Div>
+						</Pressable>
+					))}
+				</View>
+			</Div>
 		</Main>
 	);
 }
