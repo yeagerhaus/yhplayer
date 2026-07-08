@@ -568,12 +568,8 @@ public final class YhwavAudioModule: Module {
 			}
 			self.fileCache?.cancelDownloads(exceptTrackIds: keepPrefetch)
 
-			// A skip is user-initiated. Fade the incoming track in only when a track was ALREADY playing
-			// (a real mid-playback skip) — a cold start or paused restore shouldn't fade in, since there's
-			// no outgoing audio to smooth over.
-			let wasPlaying = engine.isPlaying
-			let fadeInSeconds = (self.fadeInOnManualSkip && !paused && wasPlaying) ? self.manualSkipFadeSeconds : 0
-
+			// Manually selecting a track always plays at full volume immediately — no fade-in. Only natural
+			// end-of-track advancement crossfades (a separate path inside the engine).
 			Task {
 				do {
 					try await engine.play(
@@ -582,8 +578,7 @@ public final class YhwavAudioModule: Module {
 						expectedDurationSeconds: self.expectedDurationSeconds(for: track),
 						fallbackURL: self.fallbackDirectURL(for: track),
 						startPaused: paused,
-						startAtSeconds: startAt,
-						fadeInSeconds: fadeInSeconds
+						startAtSeconds: startAt
 					)
 					await MainActor.run {
 						self.emitActiveTrackChanged(index: index)
