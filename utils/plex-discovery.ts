@@ -66,7 +66,7 @@ class PlexDiscoveryService {
 
 			// Parse JSON response (for other endpoints that support it)
 			const data = JSON.parse(responseText);
-			console.log(`   ✅ Successfully parsed JSON response`);
+			// console.log(`   ✅ Successfully parsed JSON response`);
 
 			// Handle array response (Plex returns array of resources)
 			const resources = Array.isArray(data) ? data : data.MediaContainer?.Device || [];
@@ -131,7 +131,7 @@ class PlexDiscoveryService {
 						if (reachable) {
 							best = conn;
 							found = true;
-							console.log(`      ✅ Reachable: ${conn.uri}`);
+							// console.log(`      ✅ Reachable: ${conn.uri}`);
 							break;
 						}
 						console.log(`      ❌ Unreachable: ${conn.uri}`);
@@ -147,7 +147,7 @@ class PlexDiscoveryService {
 							console.log(`      🔗 Trying direct HTTP: ${directUri}`);
 							if (await this.testConnectionUri(directUri, plexToken)) {
 								best = { uri: directUri, address: conn.address, port: conn.port, local: true };
-								console.log(`      ✅ Reachable via direct HTTP: ${directUri}`);
+								// console.log(`      ✅ Reachable via direct HTTP: ${directUri}`);
 								break;
 							}
 						}
@@ -164,7 +164,7 @@ class PlexDiscoveryService {
 						connections: allConnections,
 					};
 
-					console.log(`   ✅ Added server: ${server.name} - ${server.uri}`);
+					// console.log(`   ✅ Added server: ${server.name} - ${server.uri}`);
 					servers.push(server);
 				}
 			}
@@ -172,7 +172,7 @@ class PlexDiscoveryService {
 			// Recommended server is just the first one (connections already tested above)
 			const recommendedServer = servers[0];
 
-			console.log(`✅ Found ${servers.length} servers`);
+			// console.log(`✅ Found ${servers.length} servers`);
 			return {
 				servers,
 				recommendedServer,
@@ -265,7 +265,7 @@ class PlexDiscoveryService {
 						if (reachable) {
 							best = conn;
 							found = true;
-							console.log(`      ✅ Reachable: ${conn.uri}`);
+							// console.log(`      ✅ Reachable: ${conn.uri}`);
 							break;
 						}
 						console.log(`      ❌ Unreachable: ${conn.uri}`);
@@ -281,7 +281,7 @@ class PlexDiscoveryService {
 							console.log(`      🔗 Trying direct HTTP: ${directUri}`);
 							if (await this.testConnectionUri(directUri, plexToken)) {
 								best = { uri: directUri, address: conn.address, port: conn.port, local: true };
-								console.log(`      ✅ Reachable via direct HTTP: ${directUri}`);
+								// console.log(`      ✅ Reachable via direct HTTP: ${directUri}`);
 								break;
 							}
 						}
@@ -298,7 +298,7 @@ class PlexDiscoveryService {
 						connections: allConnections,
 					};
 
-					console.log(`   ✅ Added server: ${server.name} - ${server.uri}`);
+					// console.log(`   ✅ Added server: ${server.name} - ${server.uri}`);
 					servers.push(server);
 				}
 			}
@@ -306,7 +306,7 @@ class PlexDiscoveryService {
 			// Recommended server is just the first one (connections already tested above)
 			const recommendedServer = servers[0];
 
-			console.log(`✅ Found ${servers.length} servers`);
+			// console.log(`✅ Found ${servers.length} servers`);
 			return {
 				servers,
 				recommendedServer,
@@ -353,7 +353,7 @@ class PlexDiscoveryService {
 
 		// Try the primary URI first
 		if (await this.testConnectionUri(server.uri, plexToken)) {
-			console.log(`✅ Server ${server.name}: Connected via ${server.uri}`);
+			// console.log(`✅ Server ${server.name}: Connected via ${server.uri}`);
 			return true;
 		}
 
@@ -363,7 +363,7 @@ class PlexDiscoveryService {
 				if (conn.uri === server.uri) continue; // already tried
 				if (await this.testConnectionUri(conn.uri, plexToken)) {
 					// Update server to use the working connection
-					console.log(`✅ Server ${server.name}: Connected via fallback ${conn.uri}`);
+					// console.log(`✅ Server ${server.name}: Connected via fallback ${conn.uri}`);
 					server.uri = conn.uri;
 					server.address = conn.address;
 					server.port = conn.port;
@@ -381,7 +381,7 @@ class PlexDiscoveryService {
 				if (triedUris.has(directUri)) continue;
 				console.log(`🔗 Trying direct HTTP fallback: ${directUri}`);
 				if (await this.testConnectionUri(directUri, plexToken)) {
-					console.log(`✅ Server ${server.name}: Connected via direct HTTP ${directUri}`);
+					// console.log(`✅ Server ${server.name}: Connected via direct HTTP ${directUri}`);
 					server.uri = directUri;
 					server.address = conn.address;
 					server.port = conn.port;

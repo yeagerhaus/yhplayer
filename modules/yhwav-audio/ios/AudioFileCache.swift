@@ -62,6 +62,25 @@ final class AudioFileCache {
 		try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
 	}
 
+	/// Where streamed/downloaded files live (used by the streaming source to persist as it downloads).
+	var cacheDirectory: URL { cacheDir }
+
+	/// True if the full file for this track is already on disk (offline/prefetched) so playback can
+	/// use the fast `AVAudioFile` path instead of streaming.
+	func hasCached(trackId: String) -> Bool {
+		queue.sync { cachedFiles[trackId] != nil }
+	}
+
+	/// Registers a file the streaming source fully downloaded so replay/seek reuse it as the cache entry.
+	func registerCachedFile(trackId: String, fileURL: URL) {
+		queue.sync {
+			if let old = cachedFiles[trackId], old != fileURL {
+				try? FileManager.default.removeItem(at: old)
+			}
+			cachedFiles[trackId] = fileURL
+		}
+	}
+
 	/// - Parameter expectedDurationSeconds: Plex catalog length in seconds (from JS `duration` ms / 1000). Used to detect truncated transcodes.
 	func getAudioFile(url: URL, trackId: String, expectedDurationSeconds: Double? = nil) async throws -> AVAudioFile {
 		if url.isFileURL {

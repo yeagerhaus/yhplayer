@@ -123,6 +123,23 @@ final class AudioEnginePlayer {
 	private var trackEndWallTime: Double = 0
 	private var cachedPlaybackSeconds: Double = 0
 
+	// MARK: - Streaming (remote, progressive) state
+	//
+	// When a remote track isn't already cached we stream it: a `StreamingAudioSource` produces LPCM
+	// buffers that a background pump schedules onto the active deck, so audio starts after a short
+	// prebuffer instead of a full download. Crossfade/gapless preloading stay on the file path.
+	private var streamingSource: StreamingAudioSource?
+	private var isStreaming = false
+	private var streamReadFormat: AVAudioFormat?
+	private var streamingDuration: Double = 0
+	private let streamPumpQueue = DispatchQueue(label: "com.yhwav.stream-pump")
+	private var streamPumpTimer: DispatchSourceTimer?
+	/// Pump-queue-only state (never touch off `streamPumpQueue`).
+	private var streamInFlight = 0
+	private var streamSchedulingComplete = false
+	private let streamReadBufferSize: AVAudioFrameCount = 8192
+	private let maxInFlightStreamBuffers = 16
+
 	private var interruptionObserver: NSObjectProtocol?
 	private var routeChangeObserver: NSObjectProtocol?
 
@@ -199,6 +216,7 @@ final class AudioEnginePlayer {
 	func teardown() {
 		print("YhwavAudio: engine teardown")
 		cancelCrossfadeRamp()
+		stopStreaming()
 		playGeneration &+= 1
 		stopLevelTap()
 		removeInterruptionObservers()
@@ -267,7 +285,7 @@ final class AudioEnginePlayer {
 		}
 	}
 
-	func play(url: URL, trackId: String, expectedDurationSeconds: Double? = nil, fallbackURL: URL? = nil) async throws {
+	func play(url: URL, trackId: String, expectedDurationSeconds: Double? = nil, fallbackURL: URL? = nil, startPaused: Bool = false, startAtSeconds: Double? = nil) async throws {
 		guard let deckA = deckA, let engine = engine else { return }
 
 		playGeneration &+= 1
@@ -278,6 +296,7 @@ final class AudioEnginePlayer {
 		crossfadeIdleReady = false
 		crossfadeIdleFile = nil
 		crossfadeIdleTrackId = nil
+		stopStreaming()
 		deckA.stop()
 		deckB.stop()
 		isNextScheduled = false
@@ -288,6 +307,24 @@ final class AudioEnginePlayer {
 		deckB.volume = 0
 
 		print("YhwavAudio: play trackId=\(trackId)")
+
+		// Prefer progressive streaming for remote tracks that aren't already on disk, so playback starts
+		// after a short prebuffer. Any failure falls through to the full-download path below.
+		//
+		// Stream the DIRECT original file (`fallbackURL`) rather than the Plex universal transcoder: the
+		// transcoder returns a truncated body with no Content-Length and closes after a few seconds, which
+		// the stream reader correctly interprets as end-of-track (causing auto-skips). The original is a
+		// static file with a real Content-Length and range support, so it streams reliably.
+		let streamURL = fallbackURL ?? url
+		if !streamURL.isFileURL && !fileCache.hasCached(trackId: trackId) {
+			do {
+				try await playStreaming(url: streamURL, trackId: trackId, expectedDurationSeconds: expectedDurationSeconds, gen: gen, startPaused: startPaused, startAtSeconds: startAtSeconds)
+				return
+			} catch {
+				guard gen == playGeneration else { return }
+				print("YhwavAudio: stream failed trackId=\(trackId), falling back to download: \(error.localizedDescription)")
+			}
+		}
 
 		let file: AVAudioFile
 		do {
@@ -310,26 +347,252 @@ final class AudioEnginePlayer {
 
 		currentFile = file
 		currentTrackId = trackId
-		currentFrameOffset = 0
+		let sampleRate = file.processingFormat.sampleRate
+		// Start offset (e.g. restoring saved playback position): schedule a segment from that frame.
+		let startFrame: AVAudioFramePosition = {
+			guard let s = startAtSeconds, s > 0 else { return 0 }
+			return max(0, min(AVAudioFramePosition(s * sampleRate), file.length - 1))
+		}()
+		currentFrameOffset = startFrame
 		playerTimeBaseOffset = 0
-		cachedPlaybackSeconds = 0
+		cachedPlaybackSeconds = Double(startFrame) / sampleRate
 
-		let frameCount = AVAudioFrameCount(file.length)
-		let duration = Double(file.length) / file.processingFormat.sampleRate
-		print("YhwavAudio: schedule trackId=\(trackId) duration=\(String(format: "%.1f", duration))s frames=\(frameCount) (current)")
+		let duration = Double(file.length) / sampleRate
+		print("YhwavAudio: schedule trackId=\(trackId) duration=\(String(format: "%.1f", duration))s startFrame=\(startFrame) startPaused=\(startPaused) (current)")
 
-		deckA.scheduleFile(file, at: nil, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-			DispatchQueue.main.async {
-				self?.handleTrackCompletion(trackId: trackId, generation: gen)
+		if startFrame > 0 {
+			let remainingFrames = AVAudioFrameCount(file.length - startFrame)
+			deckA.scheduleSegment(file, startingFrame: startFrame, frameCount: remainingFrames, at: nil, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+				DispatchQueue.main.async {
+					self?.handleTrackCompletion(trackId: trackId, generation: gen)
+				}
+			}
+		} else {
+			deckA.scheduleFile(file, at: nil, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+				DispatchQueue.main.async {
+					self?.handleTrackCompletion(trackId: trackId, generation: gen)
+				}
 			}
 		}
 
-		deckA.play()
-		_isPlaying = true
+		// Restore/prepare loads a track without starting playback; only start the deck when not paused.
+		if startPaused {
+			_isPlaying = false
+		} else {
+			deckA.play()
+			_isPlaying = true
+		}
 		timePitchNode.rate = _rate
 
 		DispatchQueue.main.async { [weak self] in
 			self?.tickCrossfadeIfNeeded()
+		}
+	}
+
+	// MARK: - Streaming path
+
+	/// True while the current track is being progressively streamed (as opposed to played from a
+	/// complete on-disk file). The module uses this to avoid preloading the next track onto a deck
+	/// that's busy with streamed buffers.
+	var isCurrentStreaming: Bool { isStreaming }
+
+	private func playStreaming(url: URL, trackId: String, expectedDurationSeconds: Double?, gen: UInt64, startPaused: Bool = false, startAtSeconds: Double? = nil) async throws {
+		guard let deckA = deckA, let engine = engine else {
+			throw NSError(domain: "AudioEnginePlayer", code: -10, userInfo: [NSLocalizedDescriptionKey: "Engine unavailable"])
+		}
+
+		// Canonical LPCM format at the hardware sample rate so scheduled buffers match the deck's
+		// connection without an extra mixer conversion.
+		let hwRate = engine.mainMixerNode.outputFormat(forBus: 0).sampleRate
+		let sr = hwRate > 0 ? hwRate : 44100
+		guard let readFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sr, channels: 2, interleaved: false) else {
+			throw NSError(domain: "AudioEnginePlayer", code: -11, userInfo: [NSLocalizedDescriptionKey: "Bad read format"])
+		}
+
+		guard let source = StreamingAudioSource(url: url, trackId: trackId, readFormat: readFormat, cacheDir: fileCache.cacheDirectory) else {
+			throw NSError(domain: "AudioEnginePlayer", code: -12, userInfo: [NSLocalizedDescriptionKey: "Could not open stream"])
+		}
+
+		source.start()
+		do {
+			try await source.prime(minimumSeconds: 2.0, timeout: 25)
+		} catch {
+			source.cancel()
+			throw error
+		}
+
+		guard gen == playGeneration else {
+			source.cancel()
+			return
+		}
+
+		reconnectIfNeeded(toFormat: readFormat)
+		if !engine.isRunning { try engine.start() }
+
+		streamingSource = source
+		streamReadFormat = readFormat
+		isStreaming = true
+		currentFile = nil
+		currentTrackId = trackId
+		currentFrameOffset = 0
+		playerTimeBaseOffset = 0
+		cachedPlaybackSeconds = 0
+		let parsedDuration = source.duration
+		streamingDuration = parsedDuration > 0 ? parsedDuration : (expectedDurationSeconds ?? 0)
+		activeDeckIsA = true
+		deckA.volume = _volume
+		deckB?.volume = 0
+
+		// Start offset (e.g. restoring saved playback position): seek the source before pumping so the
+		// first scheduled buffers begin at the saved position rather than the top of the file.
+		if let s = startAtSeconds, s > 0 {
+			let clamped = streamingDuration > 0 ? min(s, streamingDuration) : s
+			source.seek(toTime: clamped)
+			currentFrameOffset = AVAudioFramePosition(clamped * sr)
+			cachedPlaybackSeconds = clamped
+		}
+
+		streamPumpQueue.sync {
+			streamInFlight = 0
+			streamSchedulingComplete = false
+			pumpStream(gen: gen)
+		}
+
+		// Restore/prepare loads a track without starting playback; only start the deck when not paused.
+		if startPaused {
+			_isPlaying = false
+		} else {
+			deckA.play()
+			_isPlaying = true
+		}
+		timePitchNode.rate = _rate
+		startStreamPump(gen: gen)
+
+		print("YhwavAudio: stream start trackId=\(trackId) dur~=\(Int(streamingDuration))s @\(Int(sr))Hz startPaused=\(startPaused)")
+	}
+
+	private func startStreamPump(gen: UInt64) {
+		stopStreamPumpTimer()
+		let timer = DispatchSource.makeTimerSource(queue: streamPumpQueue)
+		timer.schedule(deadline: .now() + 0.1, repeating: 0.1)
+		timer.setEventHandler { [weak self] in self?.pumpStream(gen: gen) }
+		streamPumpTimer = timer
+		timer.resume()
+	}
+
+	private func stopStreamPumpTimer() {
+		streamPumpTimer?.cancel()
+		streamPumpTimer = nil
+	}
+
+	/// Runs on `streamPumpQueue`. Tops up the active deck with LPCM buffers up to the in-flight budget.
+	private func pumpStream(gen: UInt64) {
+		guard gen == playGeneration, isStreaming, let source = streamingSource else { return }
+		while streamInFlight < maxInFlightStreamBuffers {
+			switch source.read(frames: streamReadBufferSize) {
+			case .data(let buffer):
+				let node = activeNode
+				streamInFlight += 1
+				node.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+					guard let self = self else { return }
+					self.streamPumpQueue.async { self.onStreamBufferPlayed(gen: gen) }
+				}
+			case .waiting:
+				return
+			case .end:
+				streamSchedulingComplete = true
+				if streamInFlight == 0 {
+					let tid = currentTrackId
+					DispatchQueue.main.async { [weak self] in self?.handleStreamCompletion(trackId: tid, gen: gen) }
+				}
+				return
+			}
+		}
+	}
+
+	/// Runs on `streamPumpQueue`. A scheduled buffer finished playing.
+	private func onStreamBufferPlayed(gen: UInt64) {
+		guard gen == playGeneration, isStreaming else { return }
+		if streamInFlight > 0 { streamInFlight -= 1 }
+		if streamSchedulingComplete {
+			if streamInFlight == 0 {
+				let tid = currentTrackId
+				DispatchQueue.main.async { [weak self] in self?.handleStreamCompletion(trackId: tid, gen: gen) }
+			}
+		} else {
+			pumpStream(gen: gen)
+		}
+	}
+
+	private func handleStreamCompletion(trackId: String?, gen: UInt64) {
+		guard gen == playGeneration, isStreaming, let trackId = trackId, currentTrackId == trackId else { return }
+		stopStreamPumpTimer()
+		_isPlaying = false
+		// A stream that ended with an error (e.g. an unrecoverable connection drop) is NOT a finished
+		// track. Surfacing the error instead of firing didFinishTrack prevents the queue from rapidly
+		// auto-skipping through truncated downloads.
+		if let err = streamingSource?.error {
+			let msg = err.localizedDescription
+			print("YhwavAudio: stream error trackId=\(trackId): \(msg)")
+			delegate?.enginePlayer(self, didEncounterError: msg, trackId: trackId)
+			return
+		}
+		if let done = streamingSource?.completedFileURL {
+			fileCache.registerCachedFile(trackId: trackId, fileURL: done)
+		}
+		trackEndWallTime = Date().timeIntervalSince1970 * 1000
+		print("YhwavAudio: stream ended trackId=\(trackId)")
+		delegate?.enginePlayer(self, didFinishTrack: trackId)
+	}
+
+	private func seekStreaming(to seconds: Double) {
+		guard let source = streamingSource, let deckA = deckA else { return }
+
+		playGeneration &+= 1
+		let gen = playGeneration
+		stopStreamPumpTimer()
+
+		let sr = streamReadFormat?.sampleRate ?? 44100
+		let clamped = max(0, streamingDuration > 0 ? min(seconds, streamingDuration) : seconds)
+		let wasPlaying = _isPlaying
+
+		let node = activeNode
+		node.stop()
+
+		streamPumpQueue.sync {
+			streamInFlight = 0
+			streamSchedulingComplete = false
+		}
+		source.seek(toTime: clamped)
+
+		currentFrameOffset = AVAudioFramePosition(clamped * sr)
+		playerTimeBaseOffset = 0
+		cachedPlaybackSeconds = clamped
+		deckA.volume = _volume
+		deckB?.volume = 0
+
+		streamPumpQueue.sync { self.pumpStream(gen: gen) }
+		if wasPlaying { node.play() }
+		startStreamPump(gen: gen)
+		print("YhwavAudio: stream seek to=\(String(format: "%.1f", clamped))s")
+	}
+
+	private func stopStreaming() {
+		guard isStreaming || streamingSource != nil else { return }
+		stopStreamPumpTimer()
+		if let src = streamingSource {
+			if let done = src.completedFileURL, let tid = currentTrackId {
+				fileCache.registerCachedFile(trackId: tid, fileURL: done)
+			}
+			src.cancel()
+		}
+		streamingSource = nil
+		isStreaming = false
+		streamReadFormat = nil
+		streamingDuration = 0
+		streamPumpQueue.sync {
+			streamInFlight = 0
+			streamSchedulingComplete = false
 		}
 	}
 
@@ -399,6 +662,7 @@ final class AudioEnginePlayer {
 
 	func clearScheduled() {
 		cancelCrossfadeRamp()
+		stopStreaming()
 		playGeneration &+= 1
 		deckA.stop()
 		deckB.stop()
@@ -450,6 +714,10 @@ final class AudioEnginePlayer {
 	}
 
 	func seek(to seconds: Double) {
+		if isStreaming {
+			seekStreaming(to: seconds)
+			return
+		}
 		guard let file = currentFile, let deckA = deckA, let deckB = deckB, let trackId = currentTrackId else { return }
 
 		cancelCrossfadeRamp()
@@ -510,6 +778,22 @@ final class AudioEnginePlayer {
 	var isPlaying: Bool { _isPlaying }
 
 	var currentPosition: Double {
+		if isStreaming {
+			let dur = currentDuration
+			let node = activeNode
+			guard let nodeTime = node.lastRenderTime,
+				  nodeTime.isSampleTimeValid,
+				  let playerTime = node.playerTime(forNodeTime: nodeTime) else {
+				return max(0, cachedPlaybackSeconds)
+			}
+			let sr = streamReadFormat?.sampleRate ?? playerTime.sampleRate
+			let frames = playerTime.sampleTime - playerTimeBaseOffset + currentFrameOffset
+			var pos = Double(frames) / sr
+			if dur > 0 { pos = min(pos, dur) }
+			let clamped = max(0, pos)
+			cachedPlaybackSeconds = clamped
+			return clamped
+		}
 		guard let file = currentFile else {
 			cachedPlaybackSeconds = 0
 			return 0
@@ -529,6 +813,11 @@ final class AudioEnginePlayer {
 	}
 
 	var currentDuration: Double {
+		if isStreaming {
+			// Parsed duration refines as more of the file downloads; keep the largest known estimate.
+			let parsed = streamingSource?.duration ?? 0
+			return max(streamingDuration, parsed)
+		}
 		guard let file = currentFile else { return 0 }
 		return Double(file.length) / file.processingFormat.sampleRate
 	}
@@ -714,8 +1003,11 @@ final class AudioEnginePlayer {
 	// MARK: - Format handling
 
 	private func reconnectIfNeeded(for file: AVAudioFile) {
+		reconnectIfNeeded(toFormat: file.processingFormat)
+	}
+
+	private func reconnectIfNeeded(toFormat fileFormat: AVAudioFormat) {
 		guard let engine = engine, let mixer = mixerNode, let timePitchNode = timePitchNode else { return }
-		let fileFormat = file.processingFormat
 		let currentFormat = deckA.outputFormat(forBus: 0)
 
 		let formatChanged = fileFormat.sampleRate != currentFormat.sampleRate || fileFormat.channelCount != currentFormat.channelCount

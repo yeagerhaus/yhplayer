@@ -50,7 +50,7 @@ export async function testLibraryLoading(trackCount: number = 10000) {
 
 	const metrics = performanceMonitor.getMetricsByName('library-load');
 	if (metrics.length > 0) {
-		console.log(`✅ Library load test completed: ${metrics[0].duration.toFixed(2)}ms`);
+		// console.log(`✅ Library load test completed: ${metrics[0].duration.toFixed(2)}ms`);
 	}
 }
 
@@ -81,7 +81,7 @@ export async function testTrackSwitching(trackCount: number = 100) {
 	const avgDuration = metrics.reduce((sum, m) => sum + m.duration, 0) / metrics.length;
 	const maxDuration = Math.max(...metrics.map((m) => m.duration));
 
-	console.log(`✅ Track switching test completed:`);
+	// console.log(`✅ Track switching test completed:`);
 	console.log(`   Average: ${avgDuration.toFixed(2)}ms`);
 	console.log(`   Max: ${maxDuration.toFixed(2)}ms`);
 	console.log(`   Total: ${metrics.reduce((sum, m) => sum + m.duration, 0).toFixed(2)}ms`);
@@ -113,7 +113,7 @@ export function testSearchPerformance(query: string) {
 
 	const duration = performance.now() - start;
 
-	console.log(`✅ Search test completed:`);
+	// console.log(`✅ Search test completed:`);
 	console.log(`   Duration: ${duration.toFixed(2)}ms`);
 	console.log(`   Results: ${results.length}`);
 	console.log(`   Tracks searched: ${Math.min(1000, tracks.length)}`);
@@ -134,7 +134,7 @@ export function testFlatListRendering(itemCount: number = 1000) {
 
 	const _duration = performance.now() - start;
 
-	console.log(`✅ FlatList rendering test:`);
+	// console.log(`✅ FlatList rendering test:`);
 	console.log(`   Estimated render time: ${renderTime.toFixed(2)}ms`);
 	console.log(`   Items: ${itemCount}`);
 }

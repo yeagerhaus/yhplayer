@@ -522,11 +522,13 @@ public final class YhwavAudioModule: Module {
 			}
 		}
 
-		AsyncFunction("skip") { (index: Int) in
+		AsyncFunction("skip") { (index: Int, startPaused: Bool?, startAtSeconds: Double?) in
 			guard self.enginePlayer != nil, index >= 0, index < self.trackOrder.count else { return }
 			let currentIdx = self.currentActiveTrackIndex()
 			let targetId = self.trackOrder[index]
-			print("YhwavAudio: skip idx=\(currentIdx)→\(index) (trackId=\(targetId)), queueSize=\(self.trackOrder.count)")
+			let paused = startPaused ?? false
+			let startAt = (startAtSeconds ?? 0) > 0 ? startAtSeconds : nil
+			print("YhwavAudio: skip idx=\(currentIdx)→\(index) (trackId=\(targetId)), queueSize=\(self.trackOrder.count) paused=\(paused)")
 
 			guard let track = self.trackMetadata[targetId],
 				  let url = URL(string: track.url) else { return }
@@ -538,7 +540,7 @@ public final class YhwavAudioModule: Module {
 				self.usingPodcastBackend = true
 				DispatchQueue.main.async {
 					self.enginePlayer?.clearScheduled()
-					self.podcastPlayer?.play(url: url, trackId: targetId, startAt: nil)
+					self.podcastPlayer?.play(url: url, trackId: targetId, startAt: startAt, startPaused: paused)
 					self.emitActiveTrackChanged(index: index)
 					self.startProgressTimerIfNeeded()
 				}
@@ -564,11 +566,18 @@ public final class YhwavAudioModule: Module {
 						url: url,
 						trackId: targetId,
 						expectedDurationSeconds: self.expectedDurationSeconds(for: track),
-						fallbackURL: self.fallbackDirectURL(for: track)
+						fallbackURL: self.fallbackDirectURL(for: track),
+						startPaused: paused,
+						startAtSeconds: startAt
 					)
 					await MainActor.run {
 						self.emitActiveTrackChanged(index: index)
-						self.startProgressTimerIfNeeded()
+						if paused {
+							// Loaded but not playing (restore): don't run the progress timer.
+							self.syncNowPlaying()
+						} else {
+							self.startProgressTimerIfNeeded()
+						}
 						self.scheduleNextTrack(afterIndex: index)
 					}
 				} catch {
@@ -768,6 +777,15 @@ public final class YhwavAudioModule: Module {
 		let nextId = trackOrder[nextIdx]
 		guard let track = trackMetadata[nextId],
 			  let url = URL(string: track.url) else { return }
+
+		// While the current track is being streamed, the active deck is busy with streamed buffers, so we
+		// can't preload the next track onto a deck (that's the crossfade/gapless file path). Instead we
+		// prefetch upcoming tracks into the cache so they play via the fast file path once current — and
+		// once a streamed track hands off to a cached one, gapless/crossfade resume normally.
+		if engine.isCurrentStreaming {
+			predownloadAhead(fromIndex: nextIdx)
+			return
+		}
 
 		let forceGapless = track.crossfadeDisabled == true
 

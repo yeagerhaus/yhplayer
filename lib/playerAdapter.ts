@@ -121,9 +121,9 @@ const TrackPlayer = {
 		if (p?.move) await p.move(fromIndex, toIndex);
 	},
 
-	async skip(index: number) {
+	async skip(index: number, options?: { startPaused?: boolean; startAtSeconds?: number }) {
 		const p = getPlayer();
-		if (p?.skip) await p.skip(index);
+		if (p?.skip) await p.skip(index, options?.startPaused ?? false, options?.startAtSeconds ?? 0);
 	},
 
 	async play() {

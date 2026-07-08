@@ -8,7 +8,6 @@
 		"start:tunnel": "EXPO_METRO_HOST=tunnel SKIP_BUN_INSTALL=1 tsx ./tools/run.ts",
 		"start:sim": "EXPO_METRO_HOST=localhost SKIP_BUN_INSTALL=1 bunx expo start --dev-client --host localhost",
 		"web": "expo start --web",
-		"prep": "bun install && npx pod-install",
 		"kill": "lsof -ti:8081 | xargs kill -9",
 		"clean": "rm -rf node_modules && rm -rf ios/Pods ios/Podfile.lock && rm -rf .expo",
 		"up": "bun update; bunx expo@latest install --check",

@@ -242,7 +242,7 @@ function getProgressStore() {
 function songToTrack(song: Song) {
 	const localUri = song.localUri || getDownloadsStore().getState().getLocalUri(song.id);
 	if (__DEV__ && !localUri) {
-		console.log(`[songToTrack] No localUri for ${song.id}, using remote URL`);
+		// console.log(`[songToTrack] No localUri for ${song.id}, using remote URL`);
 	}
 	const url = localUri || (typeof song.uri === 'string' && song.uri.trim().length > 0 ? song.uri : null);
 	if (song.source === 'podcast' && !url) {
@@ -264,7 +264,7 @@ function songToTrack(song: Song) {
 			const built = buildPlexStreamUrl(song, referenceUrl, bitrate);
 			finalUrl = built.url;
 			directUrl = built.directUrl;
-			console.log(`[songToTrack] Plex remote stream ${song.id} @ ${bitrate} kbps`);
+			// console.log(`[songToTrack] Plex remote stream ${song.id} @ ${bitrate} kbps`);
 		}
 	}
 
@@ -556,9 +556,11 @@ export const useAudioStore = create<AudioState>((set, get) => ({
 					0,
 					queue.findIndex((s) => s.id === currentSong!.id),
 				);
-				await TrackPlayer.skip(trackIndex);
-				if (position > 0) await TrackPlayer.seekTo(position);
-				await TrackPlayer.pause();
+				// Load the track paused at the saved position atomically. The native `skip` runs an async
+				// load/prime; passing startPaused/startAtSeconds lets it seek and stay paused INSIDE that
+				// task, avoiding the race where a separate pause() ran before load finished and playback
+				// then auto-started (and reset position to 0).
+				await TrackPlayer.skip(trackIndex, { startPaused: true, startAtSeconds: position > 0 ? position : undefined });
 				restoredPausedAt = Date.now();
 			} finally {
 				set({ _isRestoringPlayback: false });
@@ -577,7 +579,7 @@ export const useAudioStore = create<AudioState>((set, get) => ({
 			if (isPartialRestore) {
 				console.log('⚠️ Partial restore (library not cached): showing last track, full queue pending');
 			} else {
-				console.log(`✅ Restored playback state (${queue.length} tracks)`);
+				// console.log(`✅ Restored playback state (${queue.length} tracks)`);
 			}
 		} catch (err) {
 			console.warn('Failed to restore playback state:', err);
@@ -1214,7 +1216,7 @@ export function useTrackPlayerSync() {
 						try {
 							await TrackPlayer.skip(trackIndex);
 							await TrackPlayer.play();
-							console.log('✅ Retry succeeded');
+							// console.log('✅ Retry succeeded');
 						} catch {
 							console.warn('Retry failed, keeping player state intact');
 							useAudioStore.setState({ isPlaying: false });
@@ -1231,7 +1233,7 @@ export function useTrackPlayerSync() {
 							state._setCurrentSong(nextSong);
 							await TrackPlayer.skip(nextIndex);
 							await TrackPlayer.play();
-							console.log(`✅ Skipped failed track → ${nextSong.id}`);
+							// console.log(`✅ Skipped failed track → ${nextSong.id}`);
 						} catch {
 							useAudioStore.setState({ isPlaying: false });
 						}

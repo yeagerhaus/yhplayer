@@ -71,12 +71,12 @@ final class PodcastPlayer {
 
 	// MARK: - Playback
 
-	func play(url: URL, trackId: String, startAt: Double?) {
+	func play(url: URL, trackId: String, startAt: Double?, startPaused: Bool = false) {
 		cleanupItemObservers()
 
 		currentTrackId = trackId
 		pendingSeekSeconds = (startAt != nil && startAt! > 0) ? startAt : nil
-		shouldBePlaying = true
+		shouldBePlaying = !startPaused
 
 		let item = AVPlayerItem(asset: AVURLAsset(url: url))
 		// Preserve pitch when the user speeds up voice content.
