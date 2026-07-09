@@ -125,8 +125,11 @@ final class StreamingAudioSource: NSObject {
 		self.url = url
 		self.trackId = trackId
 		self.readFormat = readFormat
-		// Suffix `.mp3` because the Plex universal stream is MP3; extension only affects the cached file name.
-		self.persistURL = cacheDir.appendingPathComponent("stream-\(trackId).mp3")
+		// Persist with the SOURCE's real extension (e.g. flac/mp3/m4a). `AVAudioFile(forReading:)` uses the
+		// file extension as a format hint, so a hardcoded `.mp3` on FLAC bytes makes it run the MP3 parser and
+		// fail with kAudioFileInvalidFileError (1685348671) when the cached file is reopened on replay.
+		let sourceExt = url.pathExtension.isEmpty ? "mp3" : url.pathExtension
+		self.persistURL = cacheDir.appendingPathComponent("stream-\(trackId).\(sourceExt)")
 		super.init()
 
 		let context = Unmanaged.passUnretained(self).toOpaque()

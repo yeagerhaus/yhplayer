@@ -1243,31 +1243,6 @@ export function useTrackPlayerSync() {
 			}
 
 			if (event.type === Event.PlaybackError) {
-				// TEMP DIAGNOSTIC: log the failing track's URL + probe the server response.
-				// Remove once the playback-failure cause is identified.
-				if (__DEV__ && state.currentSong) {
-					try {
-						const failingTrack = songToTrack(state.currentSong);
-						console.warn(
-							`🛑 PlaybackError: id=${state.currentSong.id} "${state.currentSong.title}" source=${state.currentSong.source ?? 'music'}`,
-							(event as any)?.message ?? (event as any)?.code ?? event,
-						);
-						console.warn(`🛑 URL: ${failingTrack.url}`);
-						if ((failingTrack as any).directUrl) console.warn(`🛑 directUrl: ${(failingTrack as any).directUrl}`);
-						if (typeof failingTrack.url === 'string' && failingTrack.url.startsWith('http')) {
-							fetch(failingTrack.url, { method: 'HEAD' })
-								.then((res) => {
-									console.warn(
-										`🛑 HEAD ${res.status} ${res.statusText} · content-type=${res.headers.get('content-type')} · content-length=${res.headers.get('content-length')}`,
-									);
-								})
-								.catch((e) => console.warn('🛑 HEAD probe failed:', e?.message ?? e));
-						}
-					} catch (e: any) {
-						console.warn('🛑 PlaybackError diagnostic failed:', e?.message ?? e);
-					}
-				}
-
 				// Only retry if we were actually playing — never auto-play from a paused/restored state.
 				if (!state.isPlaying) return;
 
