@@ -1,3 +1,4 @@
+import { BlurView } from 'expo-blur';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
@@ -7,9 +8,13 @@ import { Platform, Pressable, StyleSheet } from 'react-native';
 import { ScrollView } from 'react-native-gesture-handler';
 import Animated, { FadeIn, FadeOut, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useActiveStreamFormat } from '@/hooks/useActiveStreamFormat';
 import { useAudioStore } from '@/hooks/useAudioStore';
 import { useColors } from '@/hooks/useColors';
 import { useUltraBlurColors } from '@/hooks/useUltraBlurColors';
+
+const AnimatedBlurView = Animated.createAnimatedComponent(BlurView);
+
 import { Div } from '../Div';
 import { ExtraControls } from '../Player/ExtraControls';
 import { PlaybackControls } from '../Player/PlaybackControls';
@@ -65,20 +70,20 @@ function MusicControlRow({ onToggleQueue, queueOpen }: { onToggleQueue?: () => v
 
 	return (
 		<Div transparent style={styles.controlRow}>
-			<AnimatedIconButton style={styles.sideButton} onPress={toggleShuffle}>
-				<SymbolView name='shuffle' size={22} tintColor={isShuffled ? '#fff' : inactive} />
+			<AnimatedIconButton style={[styles.sideButton, isShuffled && styles.sideButtonActive]} onPress={toggleShuffle}>
+				<SymbolView name='shuffle' size={19} tintColor={isShuffled ? '#fff' : inactive} />
 			</AnimatedIconButton>
 			<AnimatedIconButton style={styles.centerButton} onPress={skipToPrevious}>
-				<SymbolView name='backward.fill' type='hierarchical' size={32} tintColor='#fff' />
+				<SymbolView name='backward.fill' type='hierarchical' size={30} tintColor='#fff' />
 			</AnimatedIconButton>
 			<AnimatedIconButton style={styles.playButton} onPress={togglePlayPause}>
-				<SymbolView name={isPlaying ? 'pause.fill' : 'play.fill'} type='hierarchical' size={40} tintColor='#fff' />
+				<SymbolView name={isPlaying ? 'pause.fill' : 'play.fill'} type='hierarchical' size={38} tintColor='#fff' />
 			</AnimatedIconButton>
 			<AnimatedIconButton style={styles.centerButton} onPress={skipToNext}>
-				<SymbolView name='forward.fill' type='hierarchical' size={32} tintColor='#fff' />
+				<SymbolView name='forward.fill' type='hierarchical' size={30} tintColor='#fff' />
 			</AnimatedIconButton>
-			<AnimatedIconButton style={styles.sideButton} onPress={onToggleQueue}>
-				<SymbolView name='list.bullet' size={22} tintColor={queueOpen ? '#fff' : inactive} />
+			<AnimatedIconButton style={[styles.sideButton, queueOpen && styles.sideButtonActive]} onPress={onToggleQueue}>
+				<SymbolView name='list.bullet' size={19} tintColor={queueOpen ? '#fff' : inactive} />
 			</AnimatedIconButton>
 		</Div>
 	);
@@ -93,6 +98,7 @@ export const FullBleedPlayer = React.memo(
 		const artworkBgColor = useAudioStore((state) => state.artworkBgColor);
 		const { colors: ultraBlur, hasColors } = useUltraBlurColors();
 		const colors = useColors();
+		const streamFormat = useActiveStreamFormat();
 
 		const MemoizedScrollComponent = React.useMemo(() => ScrollComponentToUse, [ScrollComponentToUse]);
 
@@ -104,12 +110,24 @@ export const FullBleedPlayer = React.memo(
 			if (router.canGoBack()) router.back();
 		}, [router]);
 
-		const metadata = [currentSong?.artist, currentSong?.album].filter(Boolean).join('  ·  ');
+		const metadata = [currentSong?.artist, currentSong?.album].filter(Boolean).join(' · ');
 
 		const playerUI = (
 			<Div transparent style={styles.content}>
 				<Div transparent style={styles.infoBlock}>
-					<Text style={styles.eyebrow}>NOW PLAYING</Text>
+					<Div transparent style={styles.eyebrowRow}>
+						<Text style={styles.eyebrow}>NOW PLAYING</Text>
+						{streamFormat ? (
+							// <Div transparent style={styles.streamBadge}>
+							// 	{streamFormat.isLocal ? (
+							// 		<SymbolView name='arrow.down.circle.fill' size={11} tintColor='rgba(255,255,255,0.8)' />
+							// 	) : (
+							// 		<SymbolView name='dot.radiowaves.up.forward' size={11} tintColor='rgba(255,255,255,0.8)' />
+							// 	)}
+							<Text style={styles.streamBadgeText}>{streamFormat.label.toUpperCase()}</Text>
+							// </Div>
+						) : null}
+					</Div>
 					<Text style={styles.title} numberOfLines={3} ellipsizeMode='tail'>
 						{currentSong?.title}
 					</Text>
@@ -139,14 +157,28 @@ export const FullBleedPlayer = React.memo(
 					<Div style={[StyleSheet.absoluteFill, { backgroundColor: fallbackColor }]} transparent />
 				)}
 				<LinearGradient
-					colors={['rgba(0,0,0,0.35)', 'rgba(0,0,0,0)', 'rgba(0,0,0,0.5)', 'rgba(0,0,0,0.92)']}
-					locations={[0, 0.3, 0.62, 1]}
+					colors={['rgba(0,0,0,0.5)', 'rgba(0,0,0,0.12)', 'rgba(0,0,0,0.55)', 'rgba(0,0,0,0.97)']}
+					locations={[0, 0.32, 0.6, 1]}
 					style={StyleSheet.absoluteFill}
 				/>
 
+				{queueOpen ? (
+					<AnimatedBlurView
+						key='queue-blur'
+						entering={FadeIn.duration(260)}
+						exiting={FadeOut.duration(200)}
+						intensity={48}
+						tint='dark'
+						style={StyleSheet.absoluteFill}
+						pointerEvents='none'
+					>
+						<Div transparent style={[StyleSheet.absoluteFill, styles.queueScrim]} />
+					</AnimatedBlurView>
+				) : null}
+
 				<Div style={[styles.innerContainer, { paddingTop: insets.top }]} transparent>
 					<Div transparent style={styles.topBar}>
-						<Div transparent style={styles.dragHandle} />
+						{/* <Div transparent style={styles.dragHandle} /> */}
 						<AnimatedIconButton style={styles.collapseButton} onPress={handleCollapse} scaleTo={0.85}>
 							<SymbolView name='chevron.down' size={20} tintColor='rgba(255, 255, 255, 0.85)' />
 						</AnimatedIconButton>
@@ -210,7 +242,6 @@ const styles = StyleSheet.create({
 		position: 'absolute',
 		top: 10,
 		left: '50%',
-		marginLeft: -20,
 		width: 40,
 		height: 5,
 		backgroundColor: 'rgba(255, 255, 255, 0.6)',
@@ -239,11 +270,34 @@ const styles = StyleSheet.create({
 		width: '100%',
 		marginBottom: 8,
 	},
+	eyebrowRow: {
+		flexDirection: 'row',
+		alignItems: 'center',
+		justifyContent: 'space-between',
+		marginBottom: 10,
+	},
 	eyebrow: {
 		fontSize: 12,
 		letterSpacing: 2,
 		color: 'rgba(255, 255, 255, 0.7)',
-		marginBottom: 10,
+	},
+	streamBadge: {
+		flexDirection: 'row',
+		alignItems: 'center',
+		gap: 5,
+		paddingHorizontal: 9,
+		paddingVertical: 4,
+		borderRadius: 100,
+		backgroundColor: 'rgba(255, 255, 255, 0.14)',
+	},
+	streamBadgeText: {
+		fontSize: 10,
+		fontWeight: '700',
+		letterSpacing: 0.8,
+		color: 'rgba(255, 255, 255, 0.9)',
+	},
+	queueScrim: {
+		backgroundColor: 'rgba(0, 0, 0, 0.32)',
 	},
 	title: {
 		fontFamily: Platform.select({ ios: 'Georgia', default: 'serif' }),
@@ -257,11 +311,9 @@ const styles = StyleSheet.create({
 		fontSize: 13,
 		letterSpacing: 1.2,
 		color: 'rgba(255, 255, 255, 0.6)',
-		marginTop: 12,
 	},
 	controls: {
 		width: '100%',
-		marginTop: 20,
 	},
 	controlRow: {
 		flexDirection: 'row',
@@ -269,13 +321,18 @@ const styles = StyleSheet.create({
 		justifyContent: 'space-between',
 		width: '100%',
 		paddingHorizontal: 4,
-		marginTop: 8,
+		// marginTop: 8,
 	},
 	sideButton: {
 		width: 44,
 		height: 44,
+		borderRadius: 14,
 		justifyContent: 'center',
 		alignItems: 'center',
+		backgroundColor: 'rgba(255, 255, 255, 0.08)',
+	},
+	sideButtonActive: {
+		backgroundColor: 'rgba(255, 255, 255, 0.22)',
 	},
 	centerButton: {
 		width: 52,
