@@ -1,11 +1,10 @@
-import { router } from 'expo-router';
 import { useMemo } from 'react';
 import { useAudioStore } from '@/hooks/useAudioStore';
 import { useLibraryStore } from '@/hooks/useLibraryStore';
 import { useOfflineFilteredLibrary } from '@/hooks/useOfflineFilteredLibrary';
 import { usePodcastDownloadsStore } from '@/hooks/usePodcastDownloadsStore';
 import { usePodcastProgressStore } from '@/hooks/usePodcastProgressStore';
-import type { Album, HomeFeedItem, HomeFeedKind, HomeHub, Playlist, Song } from '@/types';
+import type { HomeFeedItem, HomeFeedKind, HomeHub, Playlist } from '@/types';
 import { toPlayableSong } from '@/types/podcast';
 import { fetchPlaylistTracks } from '@/utils/plex';
 
@@ -37,18 +36,6 @@ function recencyWeight(at?: number): number {
 
 function score(kind: HomeFeedKind, at?: number): number {
 	return KIND_WEIGHT[kind] * recencyWeight(at);
-}
-
-/** Play an album by resolving its tracks from the library; navigate as a fallback. */
-function playAlbum(album: Album, tracks: Song[], playSound: ReturnType<typeof useAudioStore.getState>['playSound']) {
-	const albumTracks = tracks
-		.filter((t) => t.albumId === album.id)
-		.sort((a, b) => a.discNumber - b.discNumber || a.trackNumber - b.trackNumber);
-	if (albumTracks.length > 0) {
-		playSound(albumTracks[0], albumTracks);
-	} else {
-		router.push({ pathname: '/(tabs)/(library)/(albums)/[albumId]', params: { albumId: album.id } });
-	}
 }
 
 /** Resolve and play a Plex playlist/mix/station from its `key`, starting at `startId` when present. */
@@ -99,7 +86,7 @@ export function useHomeFeed(): HomeFeedItem[] {
 	const progressByEpisodeId = usePodcastProgressStore((s) => s.progressByEpisodeId);
 	const downloads = usePodcastDownloadsStore((s) => s.downloads);
 
-	const { tracks, albums, playlists } = useOfflineFilteredLibrary();
+	const { playlists } = useOfflineFilteredLibrary();
 
 	return useMemo(() => {
 		const items: HomeFeedItem[] = [];
@@ -203,9 +190,10 @@ export function useHomeFeed(): HomeFeedItem[] {
 			}
 		}
 
-		// 4. Plex smart hubs — mixes, stations, suggestions, recently added.
+		// 4. Plex smart hubs — mixes, stations, suggestions. (Recently-added has its own home section.)
 		for (const hub of hubs) {
 			const { kind, eyebrow } = classifyHub(hub);
+			if (kind === 'recently-added') continue;
 
 			for (const pl of hub.playlists) {
 				add(
@@ -214,7 +202,9 @@ export function useHomeFeed(): HomeFeedItem[] {
 						kind,
 						eyebrow,
 						title: pl.title,
-						subtitle: kind === 'station' ? 'Radio' : `${pl.leafCount ?? 0} songs`,
+						// Mixes/stations are generated dynamically and report leafCount=0, so avoid a bogus "0 songs" label.
+						subtitle:
+							kind === 'station' ? 'Radio' : kind === 'mix' ? 'Mix' : pl.leafCount ? `${pl.leafCount} songs` : 'Playlist',
 						artwork: pl.artworkUrl || '',
 						score: score(kind),
 						play: () => playPlaylistKey(pl, undefined, playSound),
@@ -222,46 +212,10 @@ export function useHomeFeed(): HomeFeedItem[] {
 					`playlist:${pl.id}`,
 				);
 			}
-
-			for (const album of hub.albums) {
-				add(
-					{
-						id: `hub-album-${hub.id}-${album.id}`,
-						kind: 'recently-added',
-						eyebrow: kind === 'recently-added' ? eyebrow : 'RECENTLY ADDED',
-						title: album.title,
-						subtitle: album.artist,
-						artwork: album.artwork || album.thumb || '',
-						score: score('recently-added', album.addedAt != null ? album.addedAt * 1000 : undefined),
-						play: () => playAlbum(album, tracks, playSound),
-					},
-					`album:${album.id}`,
-				);
-			}
 		}
 
-		// 5. Fallback filler (older servers with no hubs / thin feed): recently added + playlists.
+		// 5. Fallback filler (older servers with no hubs / thin feed): recent playlists.
 		if (items.length < MAX_ITEMS) {
-			const recentAlbums = [...albums]
-				.filter((a) => a.addedAt != null)
-				.sort((a, b) => (b.addedAt ?? 0) - (a.addedAt ?? 0))
-				.slice(0, MAX_ITEMS);
-			for (const album of recentAlbums) {
-				add(
-					{
-						id: `fallback-album-${album.id}`,
-						kind: 'recently-added',
-						eyebrow: 'RECENTLY ADDED',
-						title: album.title,
-						subtitle: album.artist,
-						artwork: album.artwork || album.thumb || '',
-						score: score('recently-added', album.addedAt != null ? album.addedAt * 1000 : undefined),
-						play: () => playAlbum(album, tracks, playSound),
-					},
-					`album:${album.id}`,
-				);
-			}
-
 			const recentPlaylists = [...playlists]
 				.filter((p) => p.playlistType === 'audio' && p.artworkUrl != null)
 				.sort((a, b) => (b.lastViewedAt ?? 0) - (a.lastViewedAt ?? 0))
@@ -299,5 +253,5 @@ export function useHomeFeed(): HomeFeedItem[] {
 		}
 
 		return result;
-	}, [currentSong, currentPlaylistRatingKey, playSound, hubs, playlistsById, progressByEpisodeId, downloads, tracks, albums, playlists]);
+	}, [currentSong, currentPlaylistRatingKey, playSound, hubs, playlistsById, progressByEpisodeId, downloads, playlists]);
 }

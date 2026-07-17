@@ -31,7 +31,13 @@ export const TimeDisplay = React.memo(() => {
 	return (
 		<Div
 			transparent
-			style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20, backgroundColor: 'transparent' }}
+			style={{
+				flexDirection: 'row',
+				justifyContent: 'space-between',
+				marginTop: 2,
+				marginBottom: 10,
+				backgroundColor: 'transparent',
+			}}
 		>
 			<Text style={{ fontSize: 12, opacity: 0.6, color: '#fff' }}>{currentTime}</Text>
 			<Text style={{ fontSize: 12, opacity: 0.6, color: '#fff' }}>{remainingTime}</Text>

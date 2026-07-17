@@ -987,9 +987,15 @@ export class PlexClient {
 		await this.initialize();
 
 		try {
-			const response = await this.request(`${playlistId}`, {
-				includeStreamDetails: '1',
-			});
+			const params: Record<string, string> = { includeStreamDetails: '1' };
+			// "Mixes For You" resolve to a smart section filter (e.g. /library/sections/1/all?...),
+			// which on a music section defaults to returning artists. Force track results (type 10)
+			// so the mix loads actual songs instead of artist rows.
+			if (playlistId.includes('/library/sections/') && playlistId.includes('/all')) {
+				params.type = '10';
+			}
+
+			const response = await this.request(`${playlistId}`, params);
 			const data = response.data as any;
 			const rawTracks = data?.MediaContainer?.Metadata || [];
 
@@ -1103,21 +1109,26 @@ export class PlexClient {
 		// Build artwork URL
 		const artworkUrl = playlist.thumb ? this.buildURL(playlist.thumb) : undefined;
 
+		// Dynamically-generated "Mixes For You" have no ratingKey; fall back to their key so
+		// they get a stable id and don't collapse into one another via dedupe keys.
+		const stableKey = playlist.ratingKey ?? playlist.key;
+
 		return {
-			id: playlist.ratingKey,
+			id: stableKey,
 			title: playlist.title,
 			summary: playlist.summary,
 			playlistType: playlist.playlistType as 'audio' | 'video' | 'photo',
 			artworkUrl,
 			artwork: '', // Will be populated by image loading
 			duration: parseInt(playlist.duration || '0', 10),
-			leafCount: parseInt(playlist.leafCount || '0', 10),
+			// Mixes report leafCount="0"; keep it undefined so callers don't render a bogus count.
+			leafCount: playlist.leafCount ? parseInt(playlist.leafCount, 10) : undefined,
 			createdAt: playlist.addedAt,
 			updatedAt: playlist.updatedAt,
 			lastViewedAt: playlist.lastViewedAt ? parseInt(playlist.lastViewedAt) : undefined,
 			smart: playlist.smart === '1',
 			composite: playlist.composite,
-			ratingKey: playlist.ratingKey,
+			ratingKey: stableKey,
 			key: playlist.key,
 			guid: playlist.guid,
 		};

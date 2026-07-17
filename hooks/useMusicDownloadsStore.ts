@@ -6,6 +6,7 @@ import type { Artist } from '@/types/artist';
 import type { Playlist } from '@/types/playlist';
 import type { LoudnessData, Song } from '@/types/song';
 import { buildPlexStreamUrl } from '@/utils/plex-stream-url';
+import { useWaveformStore } from './useWaveformStore';
 
 const STORAGE_KEY = 'MUSIC_DOWNLOADS';
 const PLAYLISTS_STORAGE_KEY = 'MUSIC_DOWNLOAD_PLAYLISTS';
@@ -174,6 +175,9 @@ async function downloadQueuedSong(song: Song, get: StoreGet, set: StoreSet): Pro
 				return { downloads: { ...s.downloads, [song.id]: entry }, downloading: d, queueCompleted: s.queueCompleted + 1 };
 			});
 			persistDownloads(get().downloads);
+			// Precompute + persist the real waveform from the local file (fire-and-forget;
+			// don't block the download queue). Falls back to a placeholder if this fails.
+			void useWaveformStore.getState().computeAndStore(song.id, result.uri);
 			return;
 		} catch (err) {
 			if (attempt === MAX_DOWNLOAD_RETRIES) {
@@ -299,6 +303,7 @@ export const useMusicDownloadsStore = create<MusicDownloadsState>((set, get) => 
 		delete next[songId];
 		set({ downloads: next });
 		persistDownloads(next);
+		useWaveformStore.getState().remove(songId);
 	},
 
 	removeDownloads: async (songIds: string[]) => {
@@ -315,6 +320,7 @@ export const useMusicDownloadsStore = create<MusicDownloadsState>((set, get) => 
 		}
 		set({ downloads: next });
 		persistDownloads(next);
+		useWaveformStore.getState().removeMany(songIds);
 	},
 
 	cancelQueue: () => {
@@ -430,11 +436,13 @@ export const useMusicDownloadsStore = create<MusicDownloadsState>((set, get) => 
 
 	removeAllDownloads: async () => {
 		const { downloads } = get();
+		const songIds = Object.keys(downloads);
 		for (const entry of Object.values(downloads)) {
 			try {
 				await FileSystem.deleteAsync(entry.localUri, { idempotent: true });
 			} catch {}
 		}
+		useWaveformStore.getState().removeMany(songIds);
 		set({
 			downloads: {},
 			downloadedPlaylists: {},

@@ -61,6 +61,8 @@ type YhwavAudioModuleType = {
 	getActiveTrackIndex: () => number;
 	getQueue: () => Track[];
 	prewarmURL: (url: string, trackId: string) => Promise<void>;
+	/** Decodes the audio at `url` and returns `buckets` normalized peak amplitudes (0..1). */
+	computeWaveform: (url: string, buckets: number) => Promise<number[]>;
 	buildSearchIndex: (tracks: Array<{ id: string; title: string; artist: string; album: string }>) => Promise<void>;
 	searchTracks: (query: string, limit: number) => Promise<Array<{ id: string; score: number }>>;
 	addListener: (event: string, callback: (payload: unknown) => void) => { remove: () => void };

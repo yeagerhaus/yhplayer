@@ -264,17 +264,17 @@ const styles = StyleSheet.create({
 		flex: 1,
 		justifyContent: 'flex-end',
 		paddingHorizontal: 24,
-		paddingBottom: 20,
+		paddingBottom: 16,
 	},
 	infoBlock: {
 		width: '100%',
-		marginBottom: 8,
+		marginBottom: 4,
 	},
 	eyebrowRow: {
 		flexDirection: 'row',
 		alignItems: 'center',
 		justifyContent: 'space-between',
-		marginBottom: 10,
+		marginBottom: 6,
 	},
 	eyebrow: {
 		fontSize: 12,
