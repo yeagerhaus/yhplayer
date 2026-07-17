@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Album, Artist, Playlist, Song } from '@/types';
+import type { Album, Artist, HomeHub, Playlist, Song } from '@/types';
 import { performanceMonitor } from '@/utils/performance';
 
 interface LibraryState {
@@ -12,12 +12,14 @@ interface LibraryState {
 	playlists: Playlist[];
 	playlistsById: Record<string, Playlist>;
 	recentlyPlayed: Song[];
+	hubs: HomeHub[];
 	hasInitialized: boolean;
 	setTracks: (songs: Song[]) => void;
 	setAlbums: (albums: Album[]) => void;
 	setArtists: (artists: Artist[]) => void;
 	setPlaylists: (playlists: Playlist[]) => void;
 	setRecentlyPlayed: (songs: Song[]) => void;
+	setHubs: (hubs: HomeHub[]) => void;
 	setHasInitialized: (value: boolean) => void;
 }
 
@@ -31,10 +33,12 @@ export const useLibraryStore = create<LibraryState>((set) => ({
 	playlists: [],
 	playlistsById: {},
 	recentlyPlayed: [],
+	hubs: [],
 	hasInitialized: false,
 
 	setHasInitialized: (value: boolean) => set({ hasInitialized: value }),
 	setRecentlyPlayed: (songs: Song[]) => set({ recentlyPlayed: songs }),
+	setHubs: (hubs: HomeHub[]) => set({ hubs }),
 
 	setAlbums: (albums: Album[]) => {
 		const albumsById: Record<string, Album> = {};

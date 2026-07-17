@@ -3,11 +3,7 @@
 	"main": "expo-router/entry",
 	"version": "0.1",
 	"scripts": {
-		"start": "tsx ./tools/run.ts",
-		"start:quick": "SKIP_BUN_INSTALL=1 tsx ./tools/run.ts",
-		"start:tunnel": "EXPO_METRO_HOST=tunnel SKIP_BUN_INSTALL=1 tsx ./tools/run.ts",
-		"start:sim": "EXPO_METRO_HOST=localhost SKIP_BUN_INSTALL=1 bunx expo start --dev-client --host localhost",
-		"web": "expo start --web",
+		"start": "npx expo run:ios",
 		"kill": "lsof -ti:8081 | xargs kill -9",
 		"clean": "rm -rf node_modules && rm -rf ios/Pods ios/Podfile.lock && rm -rf .expo",
 		"up": "bun update; bunx expo@latest install --check",
@@ -17,9 +13,7 @@
 		"check:biome": "biome check --formatter-enabled=true --linter-enabled=true --vcs-enabled=true --write --unsafe .",
 		"check:all": "bun check:tsc && bun check:biome",
 		"prepare": "husky && npx patch-package",
-		"postinstall": "npx patch-package",
-		"android": "expo run:android",
-		"ios": "expo run:ios"
+		"postinstall": "npx patch-package"
 	},
 	"dependencies": {
 		"@expo/metro-runtime": "~57.0.3",
@@ -63,6 +57,7 @@
 		"react-native-reanimated": "4.5.0",
 		"react-native-safe-area-context": "~5.7.0",
 		"react-native-screens": "4.25.2",
+		"react-native-svg": "15.15.4",
 		"react-native-web": "^0.21.2",
 		"react-native-worklets": "0.10.0",
 		"tsx": "^4.21.0",

@@ -2,6 +2,7 @@ import { fetch } from 'expo/fetch';
 import { getIsOfflineMode } from '@/hooks/useOfflineModeStore';
 import type { Album } from '@/types/album';
 import type { Artist } from '@/types/artist';
+import type { HomeHub } from '@/types/home';
 import type { Playlist } from '@/types/playlist';
 import type { LoudnessData, Song } from '@/types/song';
 import { plexAuthService } from './plex-auth';
@@ -543,6 +544,85 @@ export class PlexClient {
 	}
 
 	/**
+	 * Fetch home hubs for the music section — "Mixes For You", radio stations,
+	 * recently added, etc. (GET /hubs/sections/{sectionId}). Returns normalized
+	 * hubs grouped by content type; hubs with no usable items are dropped.
+	 */
+	async fetchSectionHubs(count = 12): Promise<HomeHub[]> {
+		await this.initialize();
+
+		if (!this.musicSectionId) {
+			await this.discoverMusicSection();
+		}
+
+		if (!this.musicSectionId) {
+			throw new Error('Music section ID not found. Please ensure your library has a music section.');
+		}
+
+		const response = await this.request(`/hubs/sections/${this.musicSectionId}`, {
+			includeMyMixes: '1',
+			includeStations: '1',
+			count: String(count),
+		});
+
+		const data = response.data as any;
+		const rawHubs = data?.MediaContainer?.Hub;
+		if (!rawHubs) return [];
+		const hubList = Array.isArray(rawHubs) ? rawHubs : [rawHubs];
+
+		const hubs: HomeHub[] = [];
+		for (const hub of hubList) {
+			const rawMeta = hub?.Metadata;
+			if (!rawMeta) continue;
+			const items = Array.isArray(rawMeta) ? rawMeta : [rawMeta];
+
+			const tracks: Song[] = [];
+			const albums: Album[] = [];
+			const playlists: Playlist[] = [];
+
+			for (const item of items) {
+				try {
+					switch (item?.type) {
+						case 'track':
+							tracks.push(this.formatTrack(item));
+							break;
+						case 'album':
+							albums.push(this.formatAlbum(item));
+							break;
+						case 'playlist':
+						case 'mix':
+							playlists.push(this.formatPlaylist(item));
+							break;
+						default:
+							// Mixes/stations sometimes arrive without a type but carry a playlist key.
+							if (typeof item?.key === 'string' && (item.playlistType === 'audio' || item.key.includes('/playlists/'))) {
+								playlists.push(this.formatPlaylist(item));
+							}
+							break;
+					}
+				} catch {
+					// Skip malformed hub items rather than failing the whole hub.
+				}
+			}
+
+			if (tracks.length === 0 && albums.length === 0 && playlists.length === 0) continue;
+
+			hubs.push({
+				id: hub.hubIdentifier || hub.key || hub.title || `hub-${hubs.length}`,
+				title: hub.title || '',
+				identifier: hub.hubIdentifier || '',
+				style: hub.style,
+				type: hub.type,
+				tracks,
+				albums,
+				playlists,
+			});
+		}
+
+		return hubs;
+	}
+
+	/**
 	 * Fetch all artists from the music library (type 8)
 	 */
 	async fetchAllArtists(): Promise<Artist[]> {
@@ -907,9 +987,15 @@ export class PlexClient {
 		await this.initialize();
 
 		try {
-			const response = await this.request(`${playlistId}`, {
-				includeStreamDetails: '1',
-			});
+			const params: Record<string, string> = { includeStreamDetails: '1' };
+			// "Mixes For You" resolve to a smart section filter (e.g. /library/sections/1/all?...),
+			// which on a music section defaults to returning artists. Force track results (type 10)
+			// so the mix loads actual songs instead of artist rows.
+			if (playlistId.includes('/library/sections/') && playlistId.includes('/all')) {
+				params.type = '10';
+			}
+
+			const response = await this.request(`${playlistId}`, params);
 			const data = response.data as any;
 			const rawTracks = data?.MediaContainer?.Metadata || [];
 
@@ -1019,25 +1105,45 @@ export class PlexClient {
 		);
 	}
 
+	/**
+	 * "Mixes For You" carry no thumb of their own, but embed the centroid artist the mix is
+	 * built around. Use that artist's image so each mix shows its artist rather than a fallback.
+	 */
+	private extractCentroidThumb(playlist: any): string | undefined {
+		for (const child of [playlist?.Directory, playlist?.Metadata]) {
+			if (!child) continue;
+			const list = Array.isArray(child) ? child : [child];
+			const artist = list.find((m: any) => m && (m.centroid === '1' || m.centroid === 1 || m.type === 'artist'));
+			if (artist?.thumb) return artist.thumb;
+		}
+		return undefined;
+	}
+
 	private formatPlaylist(playlist: any): Playlist {
-		// Build artwork URL
-		const artworkUrl = playlist.thumb ? this.buildURL(playlist.thumb) : undefined;
+		// Prefer the playlist's own thumb; for "Mixes For You" fall back to the centroid artist's image.
+		const thumbPath = playlist.thumb || this.extractCentroidThumb(playlist);
+		const artworkUrl = thumbPath ? this.buildURL(thumbPath) : undefined;
+
+		// Dynamically-generated "Mixes For You" have no ratingKey; fall back to their key so
+		// they get a stable id and don't collapse into one another via dedupe keys.
+		const stableKey = playlist.ratingKey ?? playlist.key;
 
 		return {
-			id: playlist.ratingKey,
+			id: stableKey,
 			title: playlist.title,
 			summary: playlist.summary,
 			playlistType: playlist.playlistType as 'audio' | 'video' | 'photo',
 			artworkUrl,
 			artwork: '', // Will be populated by image loading
 			duration: parseInt(playlist.duration || '0', 10),
-			leafCount: parseInt(playlist.leafCount || '0', 10),
+			// Mixes report leafCount="0"; keep it undefined so callers don't render a bogus count.
+			leafCount: playlist.leafCount ? parseInt(playlist.leafCount, 10) : undefined,
 			createdAt: playlist.addedAt,
 			updatedAt: playlist.updatedAt,
 			lastViewedAt: playlist.lastViewedAt ? parseInt(playlist.lastViewedAt) : undefined,
 			smart: playlist.smart === '1',
 			composite: playlist.composite,
-			ratingKey: playlist.ratingKey,
+			ratingKey: stableKey,
 			key: playlist.key,
 			guid: playlist.guid,
 		};
@@ -1059,6 +1165,7 @@ export const plexClient = new PlexClient();
 export const testPlexServer = () => plexClient.testConnectivity();
 export const fetchAllTracks = () => plexClient.fetchAllTracks();
 export const fetchRecentlyPlayed = (limit?: number) => plexClient.fetchRecentlyPlayed(limit);
+export const fetchSectionHubs = (count?: number) => plexClient.fetchSectionHubs(count);
 export const fetchAllArtists = () => plexClient.fetchAllArtists();
 export const fetchAllAlbums = () => plexClient.fetchAllAlbums();
 export const fetchAllPlaylists = () => plexClient.fetchAllPlaylists();

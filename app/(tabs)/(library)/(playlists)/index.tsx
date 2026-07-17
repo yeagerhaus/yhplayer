@@ -20,7 +20,7 @@ export default function PlaylistsScreen() {
 	const formattedPlaylists = useMemo(
 		() =>
 			playlists
-				.filter((playlist) => playlist.playlistType === 'audio' && playlist.artworkUrl != null)
+				.filter((playlist) => playlist.playlistType === 'audio') // && playlist.artworkUrl != null) // NOTE: Uncomment this if you ever want to filter by artwork again
 				.map((playlist) => ({
 					id: playlist.key || playlist.id,
 					title: playlist.title,

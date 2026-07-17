@@ -59,6 +59,8 @@ export default function AppearanceScreen() {
 		setBrandColor,
 		useBlurInsteadOfGlass,
 		setUseBlurInsteadOfGlass,
+		useFullBleedPlayer,
+		setUseFullBleedPlayer,
 	} = useAppearanceStore();
 	const colors = useColors();
 	const effectiveBrand = brandColor ?? DEFAULT_BRAND_COLOR;
@@ -146,7 +148,7 @@ export default function AppearanceScreen() {
 				)}
 			</Div>
 
-			<Div transparent style={DefaultStyles.section}>
+			{/* <Div transparent style={DefaultStyles.section}>
 				<Text type='h3' style={DefaultStyles.sectionTitle}>
 					Liquid Glass
 				</Text>
@@ -156,6 +158,19 @@ export default function AppearanceScreen() {
 					description='Replace liquid glass (mini player, navigation buttons) with frosted glass blur.'
 					value={useBlurInsteadOfGlass}
 					onValueChange={setUseBlurInsteadOfGlass}
+				/>
+			</Div> */}
+
+			<Div transparent style={DefaultStyles.section}>
+				<Text type='h3' style={DefaultStyles.sectionTitle}>
+					Now Playing
+				</Text>
+
+				<SwitchRow
+					label='Full-bleed player'
+					description='Show album artwork as a full-screen background in the expanded player.'
+					value={useFullBleedPlayer}
+					onValueChange={setUseFullBleedPlayer}
 				/>
 			</Div>
 

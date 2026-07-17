@@ -15,6 +15,7 @@ export {
 	fetchPlaylist,
 	fetchPlaylistTracks,
 	fetchRecentlyPlayed,
+	fetchSectionHubs,
 	fetchUltraBlurColors,
 	movePlaylistItem,
 	plexClient,

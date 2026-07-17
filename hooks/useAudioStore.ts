@@ -86,6 +86,7 @@ interface AudioState {
 	seekTo: (position: number) => Promise<void>;
 	skipBackward15: () => Promise<void>;
 	skipForward15: () => Promise<void>;
+	unloadPlayer: () => Promise<void>;
 
 	// Queue management
 	addToQueue: (songs: Song[]) => Promise<void>;
@@ -905,6 +906,43 @@ export const useAudioStore = create<AudioState>((set, get) => ({
 		TrackPlayer.reset()
 			.then(() => TrackPlayer.add(songToTrack(state.currentSong!)))
 			.catch((err) => console.warn('Failed to reset queue:', err));
+	},
+
+	// Fully unload the player: stop playback, clear the queue, current song,
+	// persisted playback state, and reset progress. Leaves user settings
+	// (repeat/shuffle/volume/rate/sleep timer) untouched.
+	unloadPlayer: async () => {
+		try {
+			await TrackPlayer.reset();
+		} catch (error) {
+			console.warn('Failed to reset player during unload:', error);
+		}
+
+		prewarmedSongId = null;
+		lastCrossfadeSignature = '';
+
+		set({
+			currentSong: null,
+			queue: [],
+			originalQueue: [],
+			isPlaying: false,
+			isBuffering: false,
+			artworkBgColor: null,
+			currentPlaylistRatingKey: null,
+			error: null,
+		});
+
+		try {
+			const progressStore = getProgressStore();
+			progressStore.getState().setPosition(0);
+			progressStore.getState().setDuration(0);
+		} catch {}
+
+		storage.remove(STORAGE_QUEUE_KEY);
+		storage.remove(STORAGE_ORIGINAL_QUEUE_KEY);
+		storage.remove(STORAGE_SONG_KEY);
+		storage.remove(STORAGE_SONG_DATA_KEY);
+		storage.remove(STORAGE_POSITION_KEY);
 	},
 
 	// Reorder queue

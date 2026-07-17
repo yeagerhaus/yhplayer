@@ -2,10 +2,12 @@ import { useRouter } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { useCallback, useMemo, useState } from 'react';
 import { Pressable, RefreshControl, StyleSheet, View } from 'react-native';
-import { Div, DynamicItem, HomeSection, Main, Text } from '@/components';
+import { Div, DynamicItem, ForYouCard, HeroCard, HomeSection, Main, Text } from '@/components';
 import { useColors } from '@/hooks/useColors';
+import { useHomeFeed } from '@/hooks/useHomeFeed';
 import { useLibraryStore } from '@/hooks/useLibraryStore';
 import { useOfflineFilteredLibrary } from '@/hooks/useOfflineFilteredLibrary';
+import type { HomeFeedItem } from '@/types';
 import { clearCacheAndReload } from '@/utils/cache';
 
 const ITEM_SIZE = 190;
@@ -48,11 +50,17 @@ export default function LibraryScreen() {
 
 	const limitedRecentlyPlayed = useMemo(() => recentlyPlayed.slice(0, SECTION_LIMIT), [recentlyPlayed]);
 
+	const homeFeed = useHomeFeed();
+	const heroItem = homeFeed[0];
+	const forYouItems = useMemo(() => homeFeed.slice(1), [homeFeed]);
+
 	const onRefresh = useCallback(async () => {
 		setRefreshing(true);
 		await clearCacheAndReload();
 		setRefreshing(false);
 	}, []);
+
+	const renderForYou = useCallback((item: HomeFeedItem) => <ForYouCard item={item} size={ITEM_SIZE} />, []);
 
 	const renderRecentlyPlayed = useCallback(
 		(item: (typeof limitedRecentlyPlayed)[0]) => (
@@ -92,22 +100,6 @@ export default function LibraryScreen() {
 
 	return (
 		<Main refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.brand} />}>
-			<Div flex={1} style={{ paddingHorizontal: 16, marginBottom: 16 }} transparent>
-				<Text type='bodySM' colorVariant='muted' style={{ marginBottom: 12 }}>
-					{Number(trackCount).toLocaleString()} {trackCount === 1 ? 'Song' : 'Songs'} in Library
-				</Text>
-				<View style={styles.sectionGrid}>
-					{SECTIONS.map((section) => (
-						<Pressable key={section.title} style={styles.sectionCard} onPress={() => router.push(section.route as any)}>
-							<Div useGlass style={styles.sectionCardInner}>
-								<SymbolView name={section.icon} size={28} type='hierarchical' tintColor={colors.text} />
-								<Text type='label'>{section.title}</Text>
-							</Div>
-						</Pressable>
-					))}
-				</View>
-			</Div>
-
 			{isEmpty ? (
 				<Div transparent style={styles.emptyState}>
 					<Text type='bodySM' style={styles.emptyText}>
@@ -119,6 +111,19 @@ export default function LibraryScreen() {
 				</Div>
 			) : (
 				<Div transparent display='flex' flex={1} gap={16} style={{ paddingBottom: 40 }}>
+					{heroItem && <HeroCard item={heroItem} />}
+
+					{(forYouItems.length > 0 || isLoading) && (
+						<HomeSection
+							title='For You'
+							data={forYouItems}
+							keyExtractor={(item) => item.id}
+							renderItem={renderForYou}
+							isLoading={isLoading}
+							itemSize={ITEM_SIZE}
+						/>
+					)}
+
 					<HomeSection
 						title='Recently Played'
 						data={limitedRecentlyPlayed}
@@ -150,6 +155,22 @@ export default function LibraryScreen() {
 					/>
 				</Div>
 			)}
+
+			<Div flex={1} style={{ paddingHorizontal: 16, marginBottom: 16 }} transparent>
+				<Text type='bodySM' colorVariant='muted' style={{ marginBottom: 12 }}>
+					{Number(trackCount).toLocaleString()} {trackCount === 1 ? 'Song' : 'Songs'} in Library
+				</Text>
+				<View style={styles.sectionGrid}>
+					{SECTIONS.map((section) => (
+						<Pressable key={section.title} style={styles.sectionCard} onPress={() => router.push(section.route as any)}>
+							<Div useGlass style={styles.sectionCardInner}>
+								<SymbolView name={section.icon} size={28} type='hierarchical' tintColor={colors.text} />
+								<Text type='label'>{section.title}</Text>
+							</Div>
+						</Pressable>
+					))}
+				</View>
+			</Div>
 		</Main>
 	);
 }

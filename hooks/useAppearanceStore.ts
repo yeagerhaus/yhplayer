@@ -10,6 +10,7 @@ interface StoredAppearance {
 	showMusicTab?: boolean;
 	brandColor?: string | null;
 	useBlurInsteadOfGlass?: boolean;
+	useFullBleedPlayer?: boolean;
 }
 
 function persistAppearance(partial: StoredAppearance) {
@@ -26,11 +27,13 @@ interface AppearanceState {
 	showMusicTab: boolean;
 	brandColor: string | null;
 	useBlurInsteadOfGlass: boolean;
+	useFullBleedPlayer: boolean;
 	hydrated: boolean;
 	setShowPodcastsTab: (show: boolean) => void;
 	setShowMusicTab: (show: boolean) => void;
 	setBrandColor: (color: string | null) => void;
 	setUseBlurInsteadOfGlass: (use: boolean) => void;
+	setUseFullBleedPlayer: (use: boolean) => void;
 	hydrate: () => void;
 }
 
@@ -41,6 +44,7 @@ export const useAppearanceStore = create<AppearanceState>((set, _get) => ({
 	showMusicTab: true,
 	brandColor: null,
 	useBlurInsteadOfGlass: false,
+	useFullBleedPlayer: false,
 	hydrated: false,
 
 	setShowPodcastsTab: (show: boolean) => {
@@ -63,6 +67,11 @@ export const useAppearanceStore = create<AppearanceState>((set, _get) => ({
 		persistAppearance({ useBlurInsteadOfGlass: use });
 	},
 
+	setUseFullBleedPlayer: (use: boolean) => {
+		set({ useFullBleedPlayer: use });
+		persistAppearance({ useFullBleedPlayer: use });
+	},
+
 	hydrate: () => {
 		try {
 			const raw = storage.getString(STORAGE_KEY);
@@ -73,6 +82,7 @@ export const useAppearanceStore = create<AppearanceState>((set, _get) => ({
 					showMusicTab: parsed.showMusicTab ?? true,
 					brandColor: parsed.brandColor ?? null,
 					useBlurInsteadOfGlass: parsed.useBlurInsteadOfGlass ?? false,
+					useFullBleedPlayer: parsed.useFullBleedPlayer ?? false,
 				});
 			}
 		} catch {}

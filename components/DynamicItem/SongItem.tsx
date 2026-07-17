@@ -182,7 +182,7 @@ const SongItem = React.memo(
 							{item.title}
 						</Text>
 						<Div transparent style={styles.artistRow}>
-							{item.id === String(currentSong?.id) && <SymbolView name='music.note' size={12} tintColor={colors.brand} />}
+							{item.id === String(currentSong?.id) && <SymbolView name='music.note' size={10} tintColor={colors.brand} />}
 							{downloadIndicator}
 							<Text type='bodySM' numberOfLines={1} style={styles.songArtist}>
 								{item.artist}
@@ -211,7 +211,7 @@ const SongItem = React.memo(
 								alignItems: 'center',
 							}}
 						>
-							<SymbolView name='ellipsis' size={20} tintColor='#999' />
+							<SymbolView name='ellipsis' size={20} tintColor={colors.textSecondary} />
 						</ContextMenu>
 					</Div>
 				</Div>

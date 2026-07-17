@@ -717,6 +717,23 @@ public final class YhwavAudioModule: Module {
 			self.fileCache?.predownload(url: url, trackId: trackId)
 		}
 
+		// MARK: - Waveform
+
+		AsyncFunction("computeWaveform") { (urlString: String, buckets: Int) -> [Float] in
+			let url: URL
+			if urlString.hasPrefix("/") {
+				url = URL(fileURLWithPath: urlString)
+			} else if let parsed = URL(string: urlString) {
+				url = parsed
+			} else {
+				throw NSError(domain: "YhwavAudio", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid waveform URL"])
+			}
+			guard let peaks = WaveformExtractor.extractPeaks(url: url, buckets: max(1, buckets)) else {
+				throw NSError(domain: "YhwavAudio", code: -2, userInfo: [NSLocalizedDescriptionKey: "Failed to read audio for waveform"])
+			}
+			return peaks
+		}
+
 		// MARK: - Search
 
 		AsyncFunction("buildSearchIndex") { (tracks: [[String: Any]]) in
