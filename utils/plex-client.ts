@@ -1105,9 +1105,24 @@ export class PlexClient {
 		);
 	}
 
+	/**
+	 * "Mixes For You" carry no thumb of their own, but embed the centroid artist the mix is
+	 * built around. Use that artist's image so each mix shows its artist rather than a fallback.
+	 */
+	private extractCentroidThumb(playlist: any): string | undefined {
+		for (const child of [playlist?.Directory, playlist?.Metadata]) {
+			if (!child) continue;
+			const list = Array.isArray(child) ? child : [child];
+			const artist = list.find((m: any) => m && (m.centroid === '1' || m.centroid === 1 || m.type === 'artist'));
+			if (artist?.thumb) return artist.thumb;
+		}
+		return undefined;
+	}
+
 	private formatPlaylist(playlist: any): Playlist {
-		// Build artwork URL
-		const artworkUrl = playlist.thumb ? this.buildURL(playlist.thumb) : undefined;
+		// Prefer the playlist's own thumb; for "Mixes For You" fall back to the centroid artist's image.
+		const thumbPath = playlist.thumb || this.extractCentroidThumb(playlist);
+		const artworkUrl = thumbPath ? this.buildURL(thumbPath) : undefined;
 
 		// Dynamically-generated "Mixes For You" have no ratingKey; fall back to their key so
 		// they get a stable id and don't collapse into one another via dedupe keys.
